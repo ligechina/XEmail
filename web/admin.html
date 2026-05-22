@@ -1,0 +1,705 @@
+<!--
+  Copyright (c) 2026 Peking University & Beijing Siliconheart Technology Co., Ltd.
+  XEmail is licensed under Mulan PSL v2.
+  You can use this software according to the terms and conditions of the Mulan PSL v2.
+  You may obtain a copy of Mulan PSL v2 at:
+           http://license.coscl.org.cn/MulanPSL2
+  THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
+  EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+  MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
+  See the Mulan PSL v2 for more details.
+-->
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>用户管理 · XEmail</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="alternate icon" href="/favicon.ico" />
+    <style>
+      :root {
+        --bg: #f5f6f8;
+        --surface: #ffffff;
+        --surface-muted: #fafbfc;
+        --border: #e4e6eb;
+        --border-strong: #d4d7dd;
+        --text: #1f2328;
+        --text-muted: #6b7280;
+        --primary: #2563eb;
+        --primary-hover: #1d4ed8;
+        --primary-soft: #e8efff;
+        --danger: #dc2626;
+        --success: #16a34a;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+          "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      header.topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 18px;
+        background: var(--surface);
+        border-bottom: 1px solid var(--border);
+        height: 56px;
+        position: sticky;
+        top: 0;
+        z-index: 10;
+      }
+      .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 16px; }
+      .brand .logo {
+        width: 28px; height: 28px;
+        display: block; flex-shrink: 0;
+      }
+      .toolbar { display: flex; align-items: center; gap: 8px; }
+      .btn {
+        font: inherit; padding: 7px 14px; border-radius: 6px;
+        border: 1px solid var(--border); background: var(--surface);
+        color: var(--text); cursor: pointer; text-decoration: none;
+        display: inline-flex; align-items: center; gap: 6px;
+      }
+      .btn:hover { background: var(--surface-muted); border-color: var(--border-strong); }
+      .btn-primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+      .btn-primary:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
+      .btn-danger { color: var(--danger); border-color: var(--danger); }
+      .container { max-width: 880px; margin: 24px auto 60px; padding: 0 20px; }
+      .page-head { margin-bottom: 18px; }
+      .page-head h1 { margin: 0 0 4px; font-size: 22px; }
+      .page-head p { margin: 0; color: var(--text-muted); font-size: 13px; }
+      .card {
+        background: var(--surface); border: 1px solid var(--border);
+        border-radius: 8px; padding: 20px 22px; margin-bottom: 16px;
+      }
+      .card h2 { margin: 0 0 12px; font-size: 15px; font-weight: 600; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td {
+        padding: 9px 8px;
+        border-bottom: 1px solid var(--border);
+        text-align: left;
+        font-size: 13px;
+      }
+      th { color: var(--text-muted); font-weight: 500; }
+      tr:last-child td { border-bottom: none; }
+      .role-badge {
+        display: inline-block; padding: 1px 8px; border-radius: 10px;
+        font-size: 11px; font-weight: 500;
+      }
+      .role-admin { background: #fff1e6; color: #b45309; }
+      .role-normal { background: var(--primary-soft); color: var(--primary); }
+      .grid-form {
+        display: grid;
+        grid-template-columns: 1fr 1fr 140px 110px;
+        gap: 10px;
+        align-items: end;
+      }
+      .field { display: flex; flex-direction: column; }
+      .field label { font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+      .field input, .field select {
+        padding: 8px 10px; border: 1px solid var(--border);
+        border-radius: 6px; font: inherit; background: var(--surface); color: var(--text);
+      }
+      .field input:focus, .field select:focus {
+        outline: none; border-color: var(--primary);
+        box-shadow: 0 0 0 3px var(--primary-soft);
+      }
+      .status { min-height: 20px; padding: 4px 0; font-size: 13px; color: var(--text-muted); }
+      .status.error { color: var(--danger); }
+      .status.success { color: var(--success); }
+      .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+      /* Per-user mailbox sub-panel (inline-expanded row beneath each user) */
+      .accounts-toggle {
+        font: inherit;
+        font-size: 12px;
+        background: var(--surface-muted);
+        border: 1px solid var(--border);
+        color: var(--text);
+        padding: 3px 9px;
+        border-radius: 999px;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .accounts-toggle:hover { border-color: var(--primary); color: var(--primary); }
+      .accounts-toggle .chev { font-size: 9px; transition: transform 0.15s; }
+      .accounts-toggle.open .chev { transform: rotate(90deg); }
+
+      tr.accounts-row > td {
+        background: var(--surface-muted);
+        padding: 10px 16px 14px;
+        border-bottom: 1px solid var(--border);
+      }
+      .accounts-list {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .accounts-list .acc-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 8px 10px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+      }
+      .accounts-list .acc-row .meta {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        flex: 1;
+      }
+      .accounts-list .acc-row .label { font-weight: 500; }
+      .accounts-list .acc-row .email { color: var(--text-muted); font-size: 12px; }
+      .accounts-list .acc-row .badge {
+        font-size: 10px;
+        background: var(--primary-soft);
+        color: var(--primary);
+        padding: 1px 6px;
+        border-radius: 10px;
+        margin-left: 6px;
+      }
+      .accounts-empty {
+        color: var(--text-muted);
+        font-size: 12px;
+        padding: 6px 2px;
+      }
+      .mode-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 14px;
+      }
+      .mode-row .seg {
+        display: inline-flex;
+        background: var(--surface-muted);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 3px;
+        gap: 2px;
+      }
+      .mode-row .seg button {
+        font: inherit;
+        font-size: 13px;
+        border: 0;
+        background: transparent;
+        color: var(--text-muted);
+        padding: 6px 16px;
+        border-radius: 999px;
+        cursor: pointer;
+      }
+      .mode-row .seg button.active {
+        background: var(--primary);
+        color: #fff;
+        box-shadow: 0 1px 2px rgba(37, 99, 235, 0.3);
+      }
+      .mode-row .seg button:not(.active):hover {
+        color: var(--text);
+      }
+      .mode-row .mode-hint {
+        color: var(--text-muted);
+        font-size: 12.5px;
+        flex: 1 1 220px;
+      }
+      .mode-badge {
+        display: inline-block;
+        padding: 1px 8px;
+        border-radius: 10px;
+        font-size: 11px;
+        font-weight: 500;
+        background: var(--primary-soft);
+        color: var(--primary);
+      }
+      .mode-badge.prod { background: #ecfdf5; color: #047857; }
+    </style>
+    <script src="/i18n.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <img class="logo" src="/logo.svg" alt="XEmail" />
+        XEmail · 用户管理
+      </div>
+      <div class="toolbar">
+        <button
+          class="btn"
+          type="button"
+          onclick="closeTab()"
+          title="关闭本页"
+        >✕ 关闭</button>
+      </div>
+    </header>
+
+    <main class="container">
+      <div class="page-head">
+        <h1>用户管理</h1>
+        <p>管理员可在此创建普通/管理员用户、重置密码或删除用户。删除用户会一并删除其名下的所有邮箱账号。</p>
+      </div>
+
+      <div class="card">
+        <h2>系统模式 <span id="mode_badge" class="mode-badge">加载中…</span></h2>
+        <div class="mode-row">
+          <div class="seg" role="group" aria-label="系统模式">
+            <button id="btn_mode_dev" type="button" data-mode="dev">开发态</button>
+            <button id="btn_mode_prod" type="button" data-mode="prod">使用态</button>
+          </div>
+          <div class="mode-hint">
+            开发态会在主页显示「重新分类」「复位」等调试按钮；使用态隐藏它们，作为面向使用者的稳定版本。设置对所有用户即时生效。
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>后端服务</h2>
+        <div class="mode-row">
+          <button id="btn_shutdown" class="btn btn-danger" type="button">关闭后端</button>
+          <div class="mode-hint">
+            点击后将停止本机的 XEmail 后端进程，所有用户的浏览器页面都会立刻无法访问。下次启动请双击项目目录下
+            <code>scripts/start.command</code>。
+          </div>
+        </div>
+      </div>
+
+
+
+      <div class="card">
+        <h2>新建用户</h2>
+        <form id="form_create" class="grid-form" autocomplete="off">
+          <div class="field">
+            <label for="new_username">用户名</label>
+            <input id="new_username" minlength="3" maxlength="32" required />
+          </div>
+          <div class="field">
+            <label for="new_password">初始密码（至少 6 位）</label>
+            <input id="new_password" type="password" minlength="6" required />
+          </div>
+          <div class="field">
+            <label for="new_role">角色</label>
+            <select id="new_role">
+              <option value="normal">普通用户</option>
+              <option value="admin">管理员</option>
+            </select>
+          </div>
+          <button class="btn btn-primary" type="submit">创建</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>用户列表</h2>
+        <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px;">
+          点击「邮件账号 ▾」展开某个用户名下的邮箱账号。可代为编辑或删除，但管理员
+          <strong>不能激活</strong>别人的邮箱账号——「激活」只能由账号的实际拥有者在自己的会话中执行。
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>用户名</th>
+              <th>角色</th>
+              <th>创建时间</th>
+              <th>邮件账号</th>
+              <th style="width: 200px">操作</th>
+            </tr>
+          </thead>
+          <tbody id="user_list_body"></tbody>
+        </table>
+      </div>
+
+      <div class="status" id="status"></div>
+    </main>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const statusEl = $("status");
+
+      // "✕ 关闭": close this tab. Works when opened from the inbox
+      // topbar (target=_blank); silently no-ops on direct URL access.
+      function closeTab() {
+        try { window.close(); } catch (_) {}
+      }
+
+      function setStatus(text, level) {
+        statusEl.textContent = text || "";
+        statusEl.classList.remove("error", "success");
+        if (level) statusEl.classList.add(level);
+      }
+
+      function formatApiError(data) {
+        const d = data && data.detail;
+        if (!d) return "";
+        if (typeof d === "string") return d;
+        if (Array.isArray(d)) {
+          return d
+            .map((e) =>
+              e && typeof e === "object" ? e.msg || JSON.stringify(e) : String(e)
+            )
+            .join("；");
+        }
+        if (typeof d === "object") return d.msg || JSON.stringify(d);
+        return String(d);
+      }
+
+      async function api(url, options = {}) {
+        const res = await fetch(url, {
+          credentials: "same-origin",
+          headers: {
+            "Content-Type": "application/json",
+            ...(options.headers || {}),
+          },
+          ...options,
+        });
+        if (res.status === 401) {
+          window.location.replace("/login");
+          throw new Error(t("未登录"));
+        }
+        if (res.status === 403) {
+          // Non-admin landed here; kick back to the home page.
+          window.location.replace("/");
+          throw new Error(t("无权限"));
+        }
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(formatApiError(data) || `${t("请求失败")}（HTTP ${res.status}）`);
+        return data;
+      }
+
+      let CURRENT_USER = null;
+
+      function escapeHtml(s) {
+        return String(s ?? "").replace(/[&<>"']/g, (c) =>
+          ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+        );
+      }
+
+      async function bootstrap() {
+        try {
+          CURRENT_USER = await api("/api/auth/me");
+        } catch (_) {
+          return;
+        }
+        if (CURRENT_USER.role !== "admin") {
+          window.location.replace("/");
+          return;
+        }
+        await Promise.all([reloadUsers(), reloadSystemMode()]);
+      }
+
+      function paintModeButtons(mode) {
+        const isDev = mode === "dev";
+        $("btn_mode_dev").classList.toggle("active", isDev);
+        $("btn_mode_prod").classList.toggle("active", !isDev);
+        const badge = $("mode_badge");
+        badge.textContent = isDev ? t("当前：开发态") : t("当前：使用态");
+        badge.classList.toggle("prod", !isDev);
+      }
+
+      async function reloadSystemMode() {
+        try {
+          const data = await api("/api/system/mode");
+          paintModeButtons(data.mode);
+        } catch (err) {
+          setStatus(err.message, "error");
+        }
+      }
+
+      async function setSystemMode(mode) {
+        try {
+          const data = await api("/api/system/mode", {
+            method: "PUT",
+            body: JSON.stringify({ mode }),
+          });
+          paintModeButtons(data.mode);
+          setStatus(
+            data.mode === "dev"
+              ? t("已切换到开发态：主页将显示调试按钮。")
+              : t("已切换到使用态：主页将隐藏调试按钮。"),
+            "success"
+          );
+        } catch (err) {
+          setStatus(err.message, "error");
+        }
+      }
+
+      $("btn_mode_dev").addEventListener("click", () => setSystemMode("dev"));
+      $("btn_mode_prod").addEventListener("click", () => setSystemMode("prod"));
+
+      async function shutdownBackend() {
+        const lang = I18n.getLang();
+        const msg = lang === "en"
+          ? "Are you sure you want to shut down the backend?\n\n" +
+            "All users (including you) will immediately lose access; " +
+            "to restart, double-click scripts/start.command in the project directory."
+          : "确定要关闭后端服务吗？\n\n" +
+            "所有用户（包括你自己）的浏览器页面会立即无法继续操作；" +
+            "需要重新启动时，请到项目目录双击 scripts/start.command。";
+        if (!window.confirm(msg)) return;
+        const btn = $("btn_shutdown");
+        btn.disabled = true;
+        btn.textContent = t("正在关闭…");
+        setStatus(t("已发送关闭指令，后端将在数秒内停止。"), "success");
+        try {
+          await fetch("/api/system/shutdown", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+          }).catch(() => null);
+        } finally {
+          btn.textContent = t("后端已关闭");
+        }
+      }
+
+      $("btn_shutdown").addEventListener("click", shutdownBackend);
+
+      async function reloadUsers() {
+        try {
+          const users = await api("/api/users");
+          renderUsers(users);
+        } catch (err) {
+          setStatus(err.message, "error");
+        }
+      }
+
+      function renderUsers(users) {
+        const tbody = $("user_list_body");
+        tbody.innerHTML = "";
+        if (!users.length) {
+          tbody.innerHTML = `<tr><td colspan="5" style="color: var(--text-muted); padding: 14px 8px">${t("没有用户")}</td></tr>`;
+          return;
+        }
+        for (const u of users) {
+          const isSelf = CURRENT_USER && u.id === CURRENT_USER.id;
+          // Main row
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${escapeHtml(u.username)}${isSelf ? t("（我）") : ""}</td>
+            <td>
+              <span class="role-badge ${
+                u.role === "admin" ? "role-admin" : "role-normal"
+              }">${u.role === "admin" ? t("管理员") : t("普通用户")}</span>
+            </td>
+            <td style="color: var(--text-muted); font-size: 12px">${escapeHtml(
+              u.created_at || ""
+            )}</td>
+            <td>
+              <button class="accounts-toggle" data-act="toggle-accounts" data-user-id="${escapeHtml(u.id)}">
+                <span>${t("📧 邮件账号")}</span>
+                <span class="chev">▸</span>
+              </button>
+            </td>
+            <td>
+              <div class="row-actions">
+                <button class="btn" data-act="reset">${t("重置密码")}</button>
+                <button class="btn btn-danger" data-act="delete" ${
+                  isSelf ? `disabled title='${t("不能删除自己")}'` : ""
+                }>${t("删除")}</button>
+              </div>
+            </td>
+          `;
+          tr.querySelector('[data-act="reset"]').onclick = () => resetPassword(u);
+          const delBtn = tr.querySelector('[data-act="delete"]');
+          if (!isSelf) delBtn.onclick = () => deleteUser(u);
+          tr.querySelector('[data-act="toggle-accounts"]').onclick = (e) =>
+            toggleAccountsRow(u, e.currentTarget);
+          tbody.appendChild(tr);
+
+          // Hidden expand row — populated lazily on first toggle.
+          const expand = document.createElement("tr");
+          expand.className = "accounts-row";
+          expand.dataset.userId = u.id;
+          expand.style.display = "none";
+          expand.innerHTML = `<td colspan="5" data-role="accounts-cell">${t("加载中…")}</td>`;
+          tbody.appendChild(expand);
+        }
+      }
+
+      async function toggleAccountsRow(user, btn) {
+        const tbody = $("user_list_body");
+        const row = tbody.querySelector(`tr.accounts-row[data-user-id="${CSS.escape(user.id)}"]`);
+        if (!row) return;
+        const open = row.style.display !== "none";
+        if (open) {
+          row.style.display = "none";
+          btn.classList.remove("open");
+          btn.querySelector(".chev").textContent = "▸";
+          return;
+        }
+        row.style.display = "";
+        btn.classList.add("open");
+        btn.querySelector(".chev").textContent = "▸";
+        await loadAccountsInto(row.querySelector('[data-role="accounts-cell"]'), user);
+      }
+
+      async function loadAccountsInto(cell, user) {
+        cell.textContent = t("加载中…");
+        let data;
+        try {
+          data = await api(`/api/users/${encodeURIComponent(user.id)}/accounts`);
+        } catch (err) {
+          cell.innerHTML = `<div class="accounts-empty">${t("加载失败：")}${escapeHtml(err.message)}</div>`;
+          return;
+        }
+        const accounts = data.accounts || [];
+        const activeId = data.active_account_id || "";
+        if (!accounts.length) {
+          const lang = I18n.getLang();
+          cell.innerHTML = `<div class="accounts-empty">${
+            lang === "en"
+              ? `"${escapeHtml(user.username)}" has not created any email accounts yet.`
+              : `「${escapeHtml(user.username)}」还没有创建任何邮件账号。`
+          }</div>`;
+          return;
+        }
+        const rowsHtml = accounts
+          .map((a) => {
+            const label = a.label || a.settings?.sender_email || t("未命名");
+            const email = a.settings?.sender_email || "";
+            const isActive = a.id === activeId;
+            return `
+              <div class="acc-row" data-acc-id="${escapeHtml(a.id)}">
+                <div class="meta">
+                  <div class="label">${escapeHtml(label)}${
+                    isActive ? `<span class="badge">${t("该用户当前激活")}</span>` : ""
+                  }</div>
+                  <div class="email">${escapeHtml(email)}</div>
+                </div>
+                <div class="row-actions">
+                  <a class="btn" data-act="edit-account">${t("编辑")}</a>
+                  <button class="btn btn-danger" data-act="delete-account">${t("删除")}</button>
+                </div>
+              </div>`;
+          })
+          .join("");
+        cell.innerHTML = `<div class="accounts-list">${rowsHtml}</div>`;
+        cell.querySelectorAll(".acc-row").forEach((rowEl) => {
+          const accId = rowEl.dataset.accId;
+          const acc = accounts.find((a) => a.id === accId);
+          rowEl.querySelector('[data-act="edit-account"]').onclick = () =>
+            adminEditAccount(acc, user);
+          rowEl.querySelector('[data-act="delete-account"]').onclick = () =>
+            adminDeleteAccount(acc, user, cell);
+        });
+      }
+
+      function adminEditAccount(acc, owner) {
+        // Hop to /settings in admin-override edit mode. The settings page
+        // detects ?edit_account=ID, fetches the account via the admin-or-
+        // owner endpoint, and loads it in a clearly-labelled代为编辑 banner.
+        const u = new URL("/settings", window.location.origin);
+        u.searchParams.set("edit_account", acc.id);
+        u.searchParams.set("owner_username", owner.username || "");
+        u.searchParams.set("return_to", "/admin");
+        window.location.href = u.toString();
+      }
+
+      async function adminDeleteAccount(acc, owner, cell) {
+        const label = acc.label || acc.settings?.sender_email || t("该账号");
+        const lang = I18n.getLang();
+        const msg = lang === "en"
+          ? `Delete the email account "${label}" belonging to user "${owner.username}"?\n` +
+            "This will also delete:\n" +
+            "  · All received emails\n" +
+            "  · All drafts, sent emails, attachments\n" +
+            "  · This account's folders and classification rules\n\n" +
+            "This action cannot be undone."
+          : `确认删除用户「${owner.username}」名下的邮件账号「${label}」？\n` +
+            "将一并删除该邮箱的：\n" +
+            "  · 所有收件邮件\n" +
+            "  · 所有草稿、已发送、附件\n" +
+            "  · 该账号的文件夹与分类规则\n\n" +
+            "此操作不可撤销。";
+        if (!window.confirm(msg)) return;
+        try {
+          await api(`/api/accounts/${encodeURIComponent(acc.id)}`, { method: "DELETE" });
+          const ok2 = lang === "en"
+            ? `Deleted email account "${label}" of "${owner.username}"`
+            : `已删除「${owner.username}」的邮件账号「${label}」`;
+          setStatus(ok2, "success");
+          // Refresh just this user's mailbox list.
+          await loadAccountsInto(cell, owner);
+        } catch (err) {
+          setStatus(err.message, "error");
+        }
+      }
+
+      async function resetPassword(user) {
+        const lang = I18n.getLang();
+        const promptMsg = lang === "en"
+          ? `Set a new password for ${user.username} (at least 6 chars):`
+          : `为 ${user.username} 设置新密码（至少 6 位）：`;
+        const pw = window.prompt(promptMsg);
+        if (!pw) return;
+        if (pw.length < 6) {
+          setStatus(t("密码至少 6 位"), "error");
+          return;
+        }
+        try {
+          await api(`/api/users/${encodeURIComponent(user.id)}/password`, {
+            method: "POST",
+            body: JSON.stringify({ new_password: pw }),
+          });
+          const ok = lang === "en"
+            ? `Password reset for ${user.username}`
+            : `已重置 ${user.username} 的密码`;
+          setStatus(ok, "success");
+        } catch (err) {
+          setStatus(err.message, "error");
+        }
+      }
+
+      async function deleteUser(user) {
+        const lang = I18n.getLang();
+        const msg = lang === "en"
+          ? `Delete user "${user.username}"?\nThis will also delete all of their email accounts (mail, drafts, sent, attachments).\nThis action cannot be undone.`
+          : `删除用户「${user.username}」？\n这会同时删除该用户名下的所有邮箱账号（邮件、草稿、已发送、附件）。\n该操作不可恢复。`;
+        if (!window.confirm(msg)) return;
+        try {
+          await api(`/api/users/${encodeURIComponent(user.id)}`, {
+            method: "DELETE",
+          });
+          const ok = lang === "en"
+            ? `Deleted user "${user.username}"`
+            : `已删除用户「${user.username}」`;
+          setStatus(ok, "success");
+          await reloadUsers();
+        } catch (err) {
+          setStatus(err.message, "error");
+        }
+      }
+
+      $("form_create").addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const username = $("new_username").value.trim();
+        const password = $("new_password").value;
+        const role = $("new_role").value;
+        setStatus("");
+        try {
+          await api("/api/users", {
+            method: "POST",
+            body: JSON.stringify({ username, password, role }),
+          });
+          $("new_username").value = "";
+          $("new_password").value = "";
+          $("new_role").value = "normal";
+          const lang = I18n.getLang();
+          const ok = lang === "en"
+            ? `User "${username}" created`
+            : `已创建用户「${username}」`;
+          setStatus(ok, "success");
+          await reloadUsers();
+        } catch (err) {
+          setStatus(err.message, "error");
+        }
+      });
+
+      bootstrap();
+    </script>
+  </body>
+</html>

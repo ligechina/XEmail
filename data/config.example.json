@@ -1,0 +1,42 @@
+{
+  "active_account_id": null,
+  "accounts": [
+    {
+      "label": "示例邮箱 / Example Mailbox",
+      "settings": {
+        "sender_email": "you@example.com",
+        "_comment_sender_password": "Set this through the Web UI (Settings page). The server encrypts it with Fernet on save and rewrites this file as sender_password_enc — the cleartext field never persists to disk.",
+        "sender_password_enc": null,
+        "receiver_email": "you@example.com",
+        "smtp_host": "smtp.example.com",
+        "smtp_port": 465,
+        "smtp_use_ssl": true,
+        "smtp_use_starttls": false,
+        "imap_host": "imap.example.com",
+        "imap_port": 993,
+        "imap_use_ssl": true,
+        "imap_send_id": false,
+        "imap_id_name": "XEmail",
+        "imap_id_version": "0.1.0",
+        "imap_id_vendor": "XEmail",
+        "imap_id_support_email": "support@example.com",
+        "signature": ""
+      },
+      "sync": {
+        "sync_sent": true,
+        "sync_flags": false,
+        "sync_deletes": false,
+        "sync_folders": false,
+        "fetch_days": 30
+      },
+      "owner_user_id": "REPLACE_WITH_USER_ID",
+      "id": "acc_example000000"
+    }
+  ],
+  "llm": {
+    "api_key_enc": null
+  },
+  "system": {
+    "mode": "dev"
+  }
+}

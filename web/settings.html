@@ -1,0 +1,1611 @@
+<!--
+  Copyright (c) 2026 Peking University & Beijing Siliconheart Technology Co., Ltd.
+  XEmail is licensed under Mulan PSL v2.
+  You can use this software according to the terms and conditions of the Mulan PSL v2.
+  You may obtain a copy of Mulan PSL v2 at:
+           http://license.coscl.org.cn/MulanPSL2
+  THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
+  EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+  MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
+  See the Mulan PSL v2 for more details.
+-->
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>邮箱设置 · XEmail</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="alternate icon" href="/favicon.ico" />
+    <style>
+      :root {
+        --bg: #f5f6f8;
+        --surface: #ffffff;
+        --surface-muted: #fafbfc;
+        --border: #e4e6eb;
+        --border-strong: #d4d7dd;
+        --text: #1f2328;
+        --text-muted: #6b7280;
+        --text-subtle: #9aa1ad;
+        --primary: #2563eb;
+        --primary-hover: #1d4ed8;
+        --primary-soft: #e8efff;
+        --danger: #dc2626;
+        --success: #16a34a;
+        --radius: 8px;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      header.topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 18px;
+        background: var(--surface);
+        border-bottom: 1px solid var(--border);
+        height: 56px;
+        position: sticky;
+        top: 0;
+        z-index: 10;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-weight: 600;
+        font-size: 16px;
+      }
+      .brand .logo {
+        width: 28px;
+        height: 28px;
+        display: block;
+        flex-shrink: 0;
+      }
+      .btn {
+        font: inherit;
+        padding: 7px 14px;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: var(--text);
+        cursor: pointer;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        transition: background 0.12s, border-color 0.12s;
+      }
+      .btn:hover {
+        background: var(--surface-muted);
+        border-color: var(--border-strong);
+      }
+      .btn-primary {
+        background: var(--primary);
+        color: #fff;
+        border-color: var(--primary);
+      }
+      .btn-primary:hover {
+        background: var(--primary-hover);
+        border-color: var(--primary-hover);
+      }
+      .container {
+        max-width: 880px;
+        margin: 24px auto 60px;
+        padding: 0 20px;
+      }
+      .page-head {
+        margin-bottom: 18px;
+      }
+      .page-head h1 {
+        margin: 0 0 4px;
+        font-size: 22px;
+      }
+      .page-head p {
+        margin: 0;
+        color: var(--text-muted);
+        font-size: 13px;
+      }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 20px 22px;
+        margin-bottom: 16px;
+      }
+      .card h2 {
+        margin: 0 0 4px;
+        font-size: 15px;
+        font-weight: 600;
+      }
+      .card .desc {
+        margin: 0 0 14px;
+        color: var(--text-muted);
+        font-size: 12px;
+      }
+      /* Collapsible long-form help text. Uses <details> so it's accessible
+         and works without JS. Tucks verbose guidance behind a "说明" toggle. */
+      details.help {
+        margin: 0 0 14px;
+        font-size: 12px;
+        color: var(--text-muted);
+      }
+      details.help > summary {
+        list-style: none;
+        cursor: pointer;
+        color: var(--text-muted);
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        user-select: none;
+        padding: 2px 0;
+      }
+      details.help > summary::-webkit-details-marker { display: none; }
+      details.help > summary::before {
+        content: "▸";
+        font-size: 10px;
+        transition: transform 0.15s;
+        display: inline-block;
+      }
+      details.help[open] > summary::before { transform: rotate(90deg); }
+      details.help > summary:hover { color: var(--primary); }
+      details.help .help-body {
+        margin: 6px 0 0;
+        padding: 10px 12px;
+        background: var(--surface-muted);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        line-height: 1.6;
+      }
+      details.help .help-body p { margin: 0 0 6px; }
+      details.help .help-body p:last-child { margin-bottom: 0; }
+
+      /* Action footer — the form's final card. Visually distinguished as
+         "this is THE commit step" rather than just another config block:
+         a soft primary border + a two-column action bar with the primary
+         CTA pinned to the right (matches modal-footer convention). */
+      .card.action-footer {
+        border-color: var(--primary);
+        background: linear-gradient(180deg, var(--primary-soft) 0%, var(--surface) 36%);
+      }
+      .card.action-footer h2 {
+        color: var(--primary);
+      }
+      .action-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+        padding-top: 4px;
+      }
+      .action-bar .action-secondary,
+      .action-bar .action-primary {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .action-bar .action-primary .btn-primary {
+        min-width: 120px;
+        justify-content: center;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 14px 18px;
+      }
+      .field {
+        display: flex;
+        flex-direction: column;
+      }
+      .field.full {
+        grid-column: 1 / -1;
+      }
+      .field label {
+        font-size: 12px;
+        color: var(--text-muted);
+        margin-bottom: 4px;
+      }
+      .field input[type="text"],
+      .field input[type="password"],
+      .field input[type="email"],
+      .field input[type="number"],
+      .field input:not([type]) {
+        padding: 8px 10px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        font: inherit;
+        background: var(--surface);
+        color: var(--text);
+      }
+      .field input:focus {
+        outline: none;
+        border-color: var(--primary);
+        box-shadow: 0 0 0 3px var(--primary-soft);
+      }
+      .checkbox-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 14px 22px;
+      }
+      .checkbox-row label {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 13px;
+        color: var(--text);
+        cursor: pointer;
+      }
+      .actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 6px;
+      }
+      .status-line {
+        font-size: 13px;
+        color: var(--text-muted);
+        margin: 12px 0 0;
+        min-height: 20px;
+      }
+      .status-line.error {
+        color: var(--danger);
+      }
+      .status-line.success {
+        color: var(--success);
+      }
+      .diagnose {
+        margin-top: 14px;
+        padding: 14px;
+        background: var(--surface-muted);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+        white-space: pre-wrap;
+        min-height: 60px;
+        color: var(--text);
+      }
+      .diagnose-summary {
+        display: flex;
+        gap: 14px;
+        margin-bottom: 10px;
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 3px 10px;
+        font-size: 12px;
+        border-radius: 20px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        color: var(--text-muted);
+      }
+      .pill.ok {
+        color: var(--success);
+        border-color: rgba(22, 163, 74, 0.4);
+        background: rgba(22, 163, 74, 0.08);
+      }
+      .pill.fail {
+        color: var(--danger);
+        border-color: rgba(220, 38, 38, 0.4);
+        background: rgba(220, 38, 38, 0.08);
+      }
+      .btn.shortcut-active {
+        background: var(--primary-soft);
+        color: var(--primary);
+        border-color: var(--primary);
+        font-weight: 600;
+      }
+      .btn.shortcut-active:hover {
+        background: var(--primary-soft);
+        border-color: var(--primary);
+      }
+      .sync-mode-indicator {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        padding: 6px 12px;
+        border-radius: 6px;
+        margin-bottom: 12px;
+        background: var(--surface-muted);
+        color: var(--text-muted);
+        border: 1px solid var(--border);
+      }
+      .sync-mode-indicator.on {
+        background: rgba(22, 163, 74, 0.08);
+        color: var(--success);
+        border-color: rgba(22, 163, 74, 0.35);
+      }
+      .sync-mode-indicator.off {
+        background: rgba(220, 38, 38, 0.08);
+        color: var(--danger);
+        border-color: rgba(220, 38, 38, 0.35);
+        font-weight: 500;
+      }
+      .account-list {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+      .account-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 12px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--surface);
+      }
+      .account-row.active {
+        border-color: var(--primary);
+        background: var(--primary-soft);
+      }
+      .account-row.editing {
+        outline: 2px dashed var(--primary);
+        outline-offset: -2px;
+      }
+      .account-row .meta {
+        flex: 1;
+        min-width: 0;
+      }
+      .account-row .label {
+        font-weight: 600;
+        font-size: 13px;
+        color: var(--text);
+      }
+      .account-row .email {
+        font-size: 12px;
+        color: var(--text-muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .account-row .badge {
+        font-size: 11px;
+        padding: 2px 8px;
+        border-radius: 10px;
+        background: var(--primary);
+        color: #fff;
+        font-weight: 600;
+      }
+      .account-row .row-actions {
+        display: flex;
+        gap: 6px;
+      }
+      .account-row .btn {
+        padding: 5px 10px;
+        font-size: 12px;
+      }
+      .empty-hint {
+        font-size: 13px;
+        color: var(--text-muted);
+        padding: 16px;
+        text-align: center;
+        background: var(--surface-muted);
+        border: 1px dashed var(--border);
+        border-radius: 6px;
+      }
+      .form-mode-banner {
+        font-size: 13px;
+        padding: 8px 12px;
+        background: var(--primary-soft);
+        color: var(--primary);
+        border-radius: 6px;
+        margin-bottom: 12px;
+        font-weight: 500;
+      }
+      .form-mode-banner.creating {
+        background: rgba(22, 163, 74, 0.1);
+        color: var(--success);
+      }
+      @media (max-width: 640px) {
+        .grid {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+    <script src="/i18n.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <img class="logo" src="/logo.svg" alt="XEmail" />
+        <span>XEmail</span>
+      </div>
+      <button
+        class="btn"
+        type="button"
+        onclick="closeTab()"
+        title="关闭本页"
+      >✕ 关闭</button>
+    </header>
+
+    <main class="container">
+      <div class="page-head">
+        <h1>邮箱设置</h1>
+        <p>管理多个邮箱账号，可随时切换 / 编辑 / 删除。</p>
+      </div>
+
+      <div class="card">
+        <h2>界面语言</h2>
+        <p class="desc">选择 XEmail 界面的显示语言。</p>
+        <div class="checkbox-row" id="lang_picker">
+          <label><input type="radio" name="ui_lang" value="zh" /> 中文</label>
+          <label><input type="radio" name="ui_lang" value="en" /> English</label>
+        </div>
+        <div class="status-line" id="lang_status"></div>
+      </div>
+
+      <div class="card">
+        <h2>大模型（DeepSeek V4）</h2>
+        <p class="desc">
+          用于智能分类的 DeepSeek API Key。必填，否则主页将弹窗提醒。仅管理员可修改；
+          密钥保存在服务端，不会回显给前端。
+        </p>
+        <div class="grid">
+          <div class="field full">
+            <label for="llm_api_key">DeepSeek API Key</label>
+            <input
+              id="llm_api_key"
+              type="password"
+              placeholder="sk-..."
+              autocomplete="off"
+            />
+            <div class="desc" style="margin-top: 4px" id="llm_api_key_hint">
+              加载中…
+            </div>
+          </div>
+        </div>
+        <div class="actions">
+          <button
+            class="btn btn-primary"
+            type="button"
+            id="btn_save_llm"
+            onclick="saveLlmConfig()"
+          >
+            保存 API Key
+          </button>
+        </div>
+        <div class="status-line" id="llm_status"></div>
+      </div>
+
+      <!-- ============== LIST VIEW ============== -->
+      <div id="account_list_view">
+        <div class="card">
+          <h2>邮箱账号</h2>
+          <p class="desc">支持多账号。点击「激活」即可在主页切换收件箱；点击「编辑」可修改账号详情。</p>
+          <div class="account-list" id="account_list"></div>
+          <div class="actions">
+            <button class="btn btn-primary" type="button" onclick="startNewAccount()">+ 新增账号</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============== FORM VIEW (shown only when creating / editing an account) ============== -->
+      <div id="account_form_view" style="display: none">
+        <div class="card" style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+          <button class="btn" type="button" onclick="showListView()" id="btn_back_to_list">← 返回账号列表</button>
+          <div class="form-mode-banner" id="form_mode_banner" style="margin: 0;">正在编辑账号</div>
+        </div>
+
+        <div class="card">
+          <h2>邮箱信息</h2>
+          <p class="desc">账号显示名称（仅用于在主页和设置里区分）。</p>
+          <div class="grid">
+            <div class="field full">
+              <label for="account_label">账号名称（仅用于标识）</label>
+              <input id="account_label" placeholder="例如：工作邮箱 / 个人 Gmail" />
+            </div>
+          </div>
+        </div>
+
+      <div class="card">
+        <h2>登录凭据</h2>
+        <p class="desc">用于收发邮件的邮箱地址与授权码。</p>
+        <div class="grid">
+          <div class="field">
+            <label for="sender_email">发件邮箱</label>
+            <input id="sender_email" placeholder="例如 you@example.com" />
+          </div>
+          <div class="field">
+            <label for="sender_password">邮箱密码 / 授权码</label>
+            <input id="sender_password" type="password" placeholder="授权码（非网页登录密码）" />
+          </div>
+          <div class="field full">
+            <label for="receiver_email">默认收件邮箱</label>
+            <input id="receiver_email" placeholder="例如 you@example.com" />
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>SMTP（发件）</h2>
+        <p class="desc">用于发送邮件的服务器。</p>
+        <div class="grid">
+          <div class="field">
+            <label for="smtp_host">SMTP 主机</label>
+            <input id="smtp_host" placeholder="例如 smtp.qq.com" />
+          </div>
+          <div class="field">
+            <label for="smtp_port">SMTP 端口</label>
+            <input id="smtp_port" type="number" value="465" />
+          </div>
+          <div class="field full checkbox-row">
+            <label><input id="smtp_use_ssl" type="checkbox" checked /> 使用 SSL</label>
+            <label><input id="smtp_use_starttls" type="checkbox" /> 使用 STARTTLS</label>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>IMAP（收件）</h2>
+        <p class="desc">用于收取邮件的服务器。网易系邮箱建议开启 IMAP ID。</p>
+        <div class="grid">
+          <div class="field">
+            <label for="imap_host">IMAP 主机</label>
+            <input id="imap_host" placeholder="例如 imap.qq.com" />
+          </div>
+          <div class="field">
+            <label for="imap_port">IMAP 端口</label>
+            <input id="imap_port" type="number" value="993" />
+          </div>
+          <div class="field full checkbox-row">
+            <label><input id="imap_use_ssl" type="checkbox" checked /> 使用 SSL</label>
+            <label><input id="imap_send_id" type="checkbox" checked /> 发送 IMAP ID（网易系建议）</label>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>IMAP ID 信息</h2>
+        <p class="desc">部分邮箱服务商（如网易）要求客户端上报标识信息。</p>
+        <div class="grid">
+          <div class="field">
+            <label for="imap_id_name">name</label>
+            <input id="imap_id_name" value="XEmail" />
+          </div>
+          <div class="field">
+            <label for="imap_id_version">version</label>
+            <input id="imap_id_version" value="0.1.0" />
+          </div>
+          <div class="field">
+            <label for="imap_id_vendor">vendor</label>
+            <input id="imap_id_vendor" value="XEmail" />
+          </div>
+          <div class="field">
+            <label for="imap_id_support_email">support-email</label>
+            <input id="imap_id_support_email" value="support@example.com" />
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>服务器同步</h2>
+        <details class="help">
+          <summary>说明</summary>
+          <div class="help-body">
+            控制是否把本地的状态（已读/已回复/已删除/已发送 等）回写到 IMAP
+            服务器。如果服务器不支持子文件夹，会自动降级到上层文件夹。
+          </div>
+        </details>
+        <div class="actions" style="margin-bottom: 8px">
+          <button
+            class="btn"
+            type="button"
+            id="btn_sync_all"
+            onclick="syncSetAll(true)"
+          >
+            全部同步
+          </button>
+          <button
+            class="btn"
+            type="button"
+            id="btn_sync_none"
+            onclick="syncSetAll(false)"
+          >
+            全部不同步
+          </button>
+        </div>
+        <div class="sync-mode-indicator" id="sync_mode_label">
+          当前：未加载
+        </div>
+        <div class="grid">
+          <div class="field full checkbox-row">
+            <label
+              ><input id="sync_sent" type="checkbox" /> 同步已发送邮件（APPEND
+              到服务器 Sent）</label
+            >
+            <label
+              ><input id="sync_flags" type="checkbox" /> 同步已读 / 已回复状态（\Seen /
+              \Answered）</label
+            >
+          </div>
+          <div class="field full checkbox-row">
+            <label
+              ><input id="sync_deletes" type="checkbox" /> 同步已删除（\Deleted +
+              EXPUNGE）</label
+            >
+            <label
+              ><input id="sync_folders" type="checkbox" /> 同步文件夹结构（MOVE
+              至对应 mailbox，best-effort）</label
+            >
+          </div>
+          <div class="field">
+            <label for="fetch_days">收取最近多少天的邮件</label>
+            <input
+              id="fetch_days"
+              type="number"
+              min="1"
+              max="100"
+              value="30"
+            />
+            <div class="desc" style="margin-top: 4px">
+              点击「收取邮件」时只拉取服务器上近 N 天的邮件（1–100 天）。
+              已经收过的邮件不会重复处理——按 IMAP UID 水位 + Message-Id 双重去重。
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 邮件落款放最后：跟凭据 / 服务器配置相比，落款不会影响能否收发，重要度最低。 -->
+      <div class="card">
+        <h2>邮件落款</h2>
+        <details class="help">
+          <summary>说明</summary>
+          <div class="help-body">
+            撰写新邮件或回复邮件时自动追加到正文末尾。每个账号可独立配置；
+            编辑草稿时不会重复追加（草稿里保存的是什么就用什么）。
+          </div>
+        </details>
+        <div class="grid">
+          <div class="field full">
+            <label for="signature">落款内容</label>
+            <textarea
+              id="signature"
+              rows="5"
+              placeholder="例如：&#10;&#10;此致&#10;敬礼&#10;张三 · 示例科技有限公司"
+              style="
+                padding: 8px 10px;
+                border: 1px solid var(--border);
+                border-radius: 6px;
+                font: inherit;
+                background: var(--surface);
+                color: var(--text);
+                resize: vertical;
+                min-height: 80px;
+              "
+            ></textarea>
+            <div class="desc" style="margin-top: 4px">
+              留空表示不追加落款。最多 2000 字符。
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 导入分类设置：作用于本账号，需要账号已经保存（有 id）后才能上传。
+           创建新账号时（editingId === null）整张卡片隐藏，避免上传后找不到归属。 -->
+      <div class="card" id="account_import_card" style="display: none">
+        <h2>导入分类设置 <span style="font-size:11px;font-weight:500;color:var(--text-muted);margin-left:6px">仅作用于当前账号</span></h2>
+        <details class="help">
+          <summary>说明</summary>
+          <div class="help-body">
+            从备份或另一台机器导出的 <code>prompts.json</code> / <code>folders.json</code> 文件还原本账号的智能分类设置和文件夹结构。
+            <strong>导入会替换当前账号的对应数据</strong>（其它账号、全局系统提示均不受影响），不可撤销，请先备份。
+            导入时会自动把文件里的 <code>account_id</code> 重新指向当前账号，所以无需担心来源机器的账号 ID 与本机不一致。
+          </div>
+        </details>
+
+        <div class="grid" style="grid-template-columns: 1fr;">
+          <div class="field full">
+            <label for="import_prompts_file">prompts.json（用户提示 / 固定规则 / 经验 / 字段配置）</label>
+            <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:4px;">
+              <input id="import_prompts_file" type="file" accept=".json,application/json" />
+              <button
+                class="btn"
+                type="button"
+                id="btn_import_prompts"
+                onclick="importPrompts()"
+              >
+                导入 prompts.json
+              </button>
+            </div>
+            <div class="status-line" id="import_prompts_status"></div>
+          </div>
+
+          <div class="field full">
+            <label for="import_folders_file">folders.json（本账号的文件夹列表）</label>
+            <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:4px;">
+              <input id="import_folders_file" type="file" accept=".json,application/json" />
+              <button
+                class="btn"
+                type="button"
+                id="btn_import_folders"
+                onclick="importFolders()"
+              >
+                导入 folders.json
+              </button>
+            </div>
+            <div class="status-line" id="import_folders_status"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============== 提交（永远是表单的最后一张卡） ==============
+           视觉上做成"动作栏"而不是普通配置卡：浅蓝边、内层动作行、
+           主按钮靠右。诊断按钮做成 ghost，因为它走的是「激活账号」的
+           已存配置，并非当前表单值——和"保存"语义不同，让它分开站。 -->
+      <div class="card action-footer">
+        <h2>保存账号设置</h2>
+        <details class="help">
+          <summary>关于这些按钮</summary>
+          <div class="help-body">
+            <p><strong>保存账号</strong>：把上方表单中的所有改动写入。新增账号时会同时把它设为「激活账号」。</p>
+            <p><strong>取消</strong>：丢弃本次改动，返回账号列表（等同于顶部「← 返回」）。</p>
+            <p><strong>连接诊断</strong>：用当前「激活账号」的<em>已存配置</em>测试 SMTP / IMAP 是否可登录；如果你刚改了表单但还没点保存，诊断不会用到这些新值，请先保存再诊断。</p>
+          </div>
+        </details>
+
+        <div class="action-bar">
+          <div class="action-secondary">
+            <button class="btn" type="button" onclick="cancelEdit()" id="btn_cancel">取消</button>
+            <button class="btn" type="button" onclick="diagnoseConnection()" id="btn_diag" title="测试激活账号已存的 SMTP / IMAP 连接">
+              ⌕ 连接诊断
+            </button>
+          </div>
+          <div class="action-primary">
+            <button class="btn btn-primary" type="button" onclick="saveConfig()" id="btn_save">保存账号</button>
+          </div>
+        </div>
+
+        <div class="status-line" id="status"></div>
+        <div id="diagnose_wrap" style="display:none">
+          <div class="diagnose-summary" id="diagnose_summary"></div>
+          <div class="diagnose" id="diagnose_result"></div>
+        </div>
+      </div>
+
+      </div> <!-- /#account_form_view -->
+    </main>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const statusEl = $("status");
+
+      // Close this tab. When opened from the inbox topbar (target=_blank),
+      // window.close() succeeds and the user returns to the inbox tab. If
+      // the page was opened directly (typed URL / bookmark), close() is
+      // blocked by the browser and the user can just close the tab
+      // themselves — we do nothing else to avoid the "two inbox tabs"
+      // failure mode from the previous design.
+      function closeTab() {
+        try { window.close(); } catch (_) {}
+      }
+
+      function setStatus(text, level = "info") {
+        statusEl.textContent = text;
+        statusEl.classList.remove("error", "success");
+        if (level === "error") statusEl.classList.add("error");
+        if (level === "success") statusEl.classList.add("success");
+      }
+
+      async function api(url, options = {}) {
+        const res = await fetch(url, {
+          credentials: "same-origin",
+          ...options,
+        });
+        if (res.status === 401) {
+          window.location.replace("/login");
+          throw new Error(t("未登录，正在跳转…"));
+        }
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(formatApiError(data) || `${t("请求失败")}（HTTP ${res.status}）`);
+        return data;
+      }
+
+      let CURRENT_USER = null;
+      function isAdmin() {
+        return CURRENT_USER && CURRENT_USER.role === "admin";
+      }
+
+      async function bootstrapAuth() {
+        try {
+          CURRENT_USER = await api("/api/auth/me");
+        } catch (err) {
+          return false;
+        }
+        return true;
+      }
+
+
+      // FastAPI returns `detail` as either a string (HTTPException) or an array
+      // of Pydantic validation errors (HTTP 422). Render both as readable text
+      // — otherwise an array gets stringified to "[object Object]".
+      function formatApiError(data) {
+        const d = data && data.detail;
+        if (!d) return "";
+        if (typeof d === "string") return d;
+        if (Array.isArray(d)) {
+          return d
+            .map((e) => {
+              if (!e || typeof e !== "object") return String(e);
+              const loc = Array.isArray(e.loc)
+                ? e.loc.filter((p) => p !== "body").join(".")
+                : "";
+              const msg = e.msg || e.message || JSON.stringify(e);
+              return loc ? `${loc}: ${msg}` : msg;
+            })
+            .join("；");
+        }
+        if (typeof d === "object") return d.msg || d.message || JSON.stringify(d);
+        return String(d);
+      }
+
+      function getValue(id) {
+        return $(id).value.trim();
+      }
+
+      // editingId === null  -> creating a brand new account
+      // editingId === "<id>" -> editing that existing account
+      let editingId = null;
+      let accountsCache = { active_account_id: null, accounts: [] };
+      // Admin-override-edit state: when admin opens /settings?edit_account=ID
+      // we load that account regardless of ownership (admin power) and show
+      // a clearly-labelled banner. The list view stays scoped to admin's own
+      // accounts; this is purely a one-shot "act on behalf of" edit panel.
+      let ADMIN_EDIT = null; // {account, ownerUsername, returnTo}
+
+      const SETTINGS_FIELDS = [
+        "sender_email",
+        "sender_password",
+        "receiver_email",
+        "smtp_host",
+        "smtp_port",
+        "imap_host",
+        "imap_port",
+        "imap_id_name",
+        "imap_id_version",
+        "imap_id_vendor",
+        "imap_id_support_email",
+      ];
+
+      const SETTINGS_DEFAULTS = {
+        smtp_port: 465,
+        imap_port: 993,
+        imap_id_name: "XEmail",
+        imap_id_version: "0.1.0",
+        imap_id_vendor: "XEmail",
+        imap_id_support_email: "support@example.com",
+      };
+
+      function clearForm() {
+        $("account_label").value = "";
+        for (const k of SETTINGS_FIELDS) {
+          $(k).value = SETTINGS_DEFAULTS[k] !== undefined ? SETTINGS_DEFAULTS[k] : "";
+        }
+        $("signature").value = "";
+        $("smtp_use_ssl").checked = true;
+        $("smtp_use_starttls").checked = false;
+        $("imap_use_ssl").checked = true;
+        $("imap_send_id").checked = true;
+        $("sync_sent").checked = false;
+        $("sync_flags").checked = false;
+        $("sync_deletes").checked = false;
+        $("sync_folders").checked = false;
+        $("fetch_days").value = 30;
+        updateSyncShortcutState();
+      }
+
+      function loadAccountIntoForm(acc) {
+        const s = (acc && acc.settings) || {};
+        $("account_label").value = acc.label || "";
+        for (const key of SETTINGS_FIELDS) {
+          if (s[key] !== undefined && s[key] !== null) $(key).value = s[key];
+          else if (SETTINGS_DEFAULTS[key] !== undefined) $(key).value = SETTINGS_DEFAULTS[key];
+          else $(key).value = "";
+        }
+        $("signature").value = s.signature || "";
+        $("smtp_use_ssl").checked = !!s.smtp_use_ssl;
+        $("smtp_use_starttls").checked = !!s.smtp_use_starttls;
+        $("imap_use_ssl").checked = !!s.imap_use_ssl;
+        $("imap_send_id").checked = s.imap_send_id !== false;
+        const sync = (acc && acc.sync) || {};
+        $("sync_sent").checked = !!sync.sync_sent;
+        $("sync_flags").checked = !!sync.sync_flags;
+        $("sync_deletes").checked = !!sync.sync_deletes;
+        $("sync_folders").checked = !!sync.sync_folders;
+        // Honor sync.fetch_days; fall back to the SyncSettings default (30).
+        // Old configs may still carry sync.fetch_limit — it's silently dropped
+        // because the count-based fetch no longer exists.
+        const days = Number(sync.fetch_days);
+        $("fetch_days").value =
+          Number.isFinite(days) && days >= 1 && days <= 100 ? days : 30;
+        updateSyncShortcutState();
+      }
+
+      function updateFormModeBanner() {
+        const banner = $("form_mode_banner");
+        const saveBtn = $("btn_save");
+        const backBtn = $("btn_back_to_list");
+        const lang = I18n.getLang();
+        if (ADMIN_EDIT) {
+          const a = ADMIN_EDIT.account;
+          const name = (a && (a.label || a.settings?.sender_email)) || t("未命名");
+          const owner = ADMIN_EDIT.ownerUsername || "?";
+          banner.innerHTML =
+            lang === "en"
+              ? `⚠ Admin edit: account "${escapeHtml(name)}" of user "${escapeHtml(owner)}" (saves apply immediately; does not activate in your session)`
+              : `⚠ 代为编辑：用户「${escapeHtml(owner)}」的邮件账号 「${escapeHtml(name)}」（保存即生效；不会激活到你的会话）`;
+          banner.classList.remove("creating");
+          banner.style.background = "#fef3c7";
+          banner.style.color = "#92400e";
+          saveBtn.textContent = t("保存（代为编辑）");
+          if (backBtn) backBtn.textContent = t("← 返回用户管理");
+          return;
+        }
+        // Reset any admin-mode visual tweaks before painting the normal banner.
+        banner.style.background = "";
+        banner.style.color = "";
+        if (backBtn) backBtn.textContent = t("← 返回账号列表");
+        if (editingId === null) {
+          banner.textContent = t("✚ 正在创建新账号");
+          banner.classList.add("creating");
+          saveBtn.textContent = t("创建账号");
+        } else {
+          const acc = accountsCache.accounts.find((a) => a.id === editingId);
+          const name = (acc && (acc.label || acc.settings?.sender_email)) || t("未命名");
+          banner.textContent = lang === "en" ? `✎ Editing: ${name}` : `✎ 正在编辑：${name}`;
+          banner.classList.remove("creating");
+          saveBtn.textContent = t("保存账号");
+        }
+      }
+
+      // ============== view switching (list <-> account form) ==============
+      // The 8 account-form cards live inside #account_form_view, hidden by
+      // default. Showing the form is gated on user intent — clicking
+      // 「+ 新增账号」 or 「编辑」 — so the default settings page is just a
+      // short list of accounts plus the LLM / import cards.
+      function showFormView() {
+        const list = $("account_list_view");
+        const form = $("account_form_view");
+        if (list) list.style.display = "none";
+        if (form) form.style.display = "";
+        applyImportCardVisibility();
+        window.scrollTo({ top: 0, behavior: "auto" });
+      }
+
+      function showListView() {
+        // In admin-override mode the "list" doesn't make sense — we never
+        // saw admin's own accounts in this entry path. Send them back to
+        // wherever they came from (typically /admin) instead.
+        if (ADMIN_EDIT) {
+          const target = ADMIN_EDIT.returnTo || "/admin";
+          window.location.href = target;
+          return;
+        }
+        const list = $("account_list_view");
+        const form = $("account_form_view");
+        if (list) list.style.display = "";
+        if (form) form.style.display = "none";
+        // Reset form state so the next 「+ 新增账号」 doesn't show stale data.
+        editingId = null;
+        clearForm();
+        setStatus("");
+        const diag = $("diagnose_wrap");
+        if (diag) diag.style.display = "none";
+      }
+
+      function renderAccountList() {
+        const wrap = $("account_list");
+        wrap.innerHTML = "";
+        const { active_account_id, accounts } = accountsCache;
+        if (!accounts.length) {
+          const hint = I18n.getLang() === "en"
+            ? 'No accounts yet. Click "+ Add Account" below to create your first email account.'
+            : '还没有账号。点击下方「+ 新增账号」开始创建第一个邮箱账号。';
+          wrap.innerHTML = `<div class="empty-hint">${hint}</div>`;
+          return;
+        }
+        for (const acc of accounts) {
+          const row = document.createElement("div");
+          row.className = "account-row";
+          if (acc.id === active_account_id) row.classList.add("active");
+          if (acc.id === editingId) row.classList.add("editing");
+          const label = acc.label || acc.settings?.sender_email || t("未命名");
+          const email = acc.settings?.sender_email || "";
+          const isActive = acc.id === active_account_id;
+          // Delete is admin-only per spec; hide the button for normal users.
+          const canDelete = isAdmin();
+          const activeBadge = I18n.getLang() === "en" ? "active" : "激活";
+          const activateLabel = I18n.getLang() === "en" ? "Activate" : "激活";
+          const editLabel = t("编辑");
+          const deleteLabel = t("删除");
+          row.innerHTML = `
+            <div class="meta">
+              <div class="label">${escapeHtml(label)} ${
+                isActive ? `<span class="badge">${activeBadge}</span>` : ""
+              }</div>
+              <div class="email">${escapeHtml(email)}</div>
+            </div>
+            <div class="row-actions">
+              <button class="btn" data-act="activate" ${isActive ? "disabled" : ""}>${activateLabel}</button>
+              <button class="btn" data-act="edit">${editLabel}</button>
+              ${canDelete ? `<button class="btn" data-act="delete">${deleteLabel}</button>` : ""}
+            </div>
+          `;
+          row.querySelector('[data-act="activate"]').onclick = () => activateAccount(acc.id);
+          row.querySelector('[data-act="edit"]').onclick = () => editAccount(acc.id);
+          const delBtn = row.querySelector('[data-act="delete"]');
+          if (delBtn) delBtn.onclick = () => deleteAccount(acc.id);
+          wrap.appendChild(row);
+        }
+      }
+
+      function escapeHtml(s) {
+        return String(s ?? "").replace(/[&<>"']/g, (c) =>
+          ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+        );
+      }
+
+      async function loadAccounts(preserveEditing = false) {
+        try {
+          accountsCache = await api("/api/accounts");
+          if (!preserveEditing) {
+            // The default landing is the list view. If there's an editing
+            // session in progress (after save), the form keeps its data so
+            // the user sees the row updated; we never auto-jump into a form
+            // from a fresh page load.
+            if (editingId) {
+              const acc = accountsCache.accounts.find((a) => a.id === editingId);
+              if (acc) loadAccountIntoForm(acc);
+            }
+          }
+          renderAccountList();
+          updateFormModeBanner();
+        } catch (err) {
+          setStatus(err.message, "error");
+        }
+      }
+
+      function startNewAccount() {
+        editingId = null;
+        clearForm();
+        renderAccountList();
+        updateFormModeBanner();
+        showFormView();
+        $("account_label").focus();
+        setStatus("");
+      }
+
+      function cancelEdit() {
+        // Pure cancel — discard whatever's in the form and go back to the list.
+        showListView();
+        renderAccountList();
+      }
+
+      function editAccount(id) {
+        const acc = accountsCache.accounts.find((a) => a.id === id);
+        if (!acc) return;
+        editingId = id;
+        loadAccountIntoForm(acc);
+        renderAccountList();
+        updateFormModeBanner();
+        showFormView();
+        setStatus("");
+      }
+
+      async function activateAccount(id) {
+        try {
+          await api(`/api/accounts/${encodeURIComponent(id)}/activate`, { method: "POST" });
+          setStatus(t("已激活该账号"), "success");
+          await loadAccounts(true);
+        } catch (err) {
+          setStatus(err.message, "error");
+        }
+      }
+
+      async function deleteAccount(id) {
+        const acc = accountsCache.accounts.find((a) => a.id === id);
+        if (!acc) return;
+        const name = acc.label || acc.settings?.sender_email || t("该账号");
+        const lang = I18n.getLang();
+        const msg = lang === "en"
+          ? `Are you sure you want to delete account "${name}"?\n\n` +
+            "This will also delete:\n" +
+            "  · All received emails\n" +
+            "  · All drafts\n" +
+            "  · All sent emails\n" +
+            "  · All attachments\n" +
+            "  · This account's folder settings\n\n" +
+            "This action cannot be undone."
+          : `确定删除账号「${name}」吗？\n\n` +
+            "将一并删除此账号下的：\n" +
+            "  · 所有收件邮件\n" +
+            "  · 所有草稿\n" +
+            "  · 所有已发送邮件\n" +
+            "  · 所有附件\n" +
+            "  · 该账号的文件夹设置\n\n" +
+            "此操作不可撤销。";
+        const ok = confirm(msg);
+        if (!ok) return;
+        try {
+          await api(`/api/accounts/${encodeURIComponent(id)}`, { method: "DELETE" });
+          const ok2 = lang === "en"
+            ? `Account "${name}" and all its data have been deleted`
+            : `已删除账号「${name}」及其所有数据`;
+          setStatus(ok2, "success");
+          if (editingId === id) editingId = null;
+          await loadAccounts(false);
+        } catch (err) {
+          setStatus(err.message, "error");
+        }
+      }
+
+      function updateSyncShortcutState() {
+        const allOn =
+          $("sync_sent").checked &&
+          $("sync_flags").checked &&
+          $("sync_deletes").checked &&
+          $("sync_folders").checked;
+        const allOff =
+          !$("sync_sent").checked &&
+          !$("sync_flags").checked &&
+          !$("sync_deletes").checked &&
+          !$("sync_folders").checked;
+        $("btn_sync_all").classList.toggle("shortcut-active", allOn);
+        $("btn_sync_none").classList.toggle("shortcut-active", allOff);
+        const label = $("sync_mode_label");
+        label.classList.remove("on", "off");
+        if (allOn) {
+          label.textContent = t("✓ 当前：全部同步");
+          label.classList.add("on");
+        } else if (allOff) {
+          label.textContent = t("🔒 当前处于完全不同步状态 — 任何状态都不会回写到邮件服务器");
+          label.classList.add("off");
+        } else {
+          label.textContent = t("当前：自定义同步设置");
+        }
+      }
+
+      async function syncSetAll(value) {
+        const lang = I18n.getLang();
+        if (!value) {
+          const msg = lang === "en"
+            ? "Are you sure you want to disable all server sync?\n\n" +
+              "Once disabled, no local state (read / replied / deleted / sent " +
+              "archive / folder changes) will be written back to the mail server."
+            : "确定关闭所有服务器同步吗？\n\n" +
+              "选择后，本地任何状态（已读 / 已回复 / 已删除 / 发件归档 / " +
+              "文件夹变更）都不会回写到邮件服务器。";
+          if (!confirm(msg)) return;
+        }
+        $("sync_sent").checked = value;
+        $("sync_flags").checked = value;
+        $("sync_deletes").checked = value;
+        $("sync_folders").checked = value;
+        updateSyncShortcutState();
+        if (editingId) {
+          await saveConfig(
+            value ? t("已开启全部同步并保存") : t("已关闭全部同步并保存")
+          );
+        } else {
+          setStatus(t("已在表单中调整同步设置；点击「创建账号」后生效"), "info");
+        }
+      }
+
+      function buildPayload() {
+        return {
+          label: getValue("account_label"),
+          settings: {
+            sender_email: getValue("sender_email"),
+            sender_password: getValue("sender_password"),
+            receiver_email: getValue("receiver_email"),
+            smtp_host: getValue("smtp_host"),
+            smtp_port: Number(getValue("smtp_port")) || 465,
+            smtp_use_ssl: $("smtp_use_ssl").checked,
+            smtp_use_starttls: $("smtp_use_starttls").checked,
+            imap_host: getValue("imap_host"),
+            imap_port: Number(getValue("imap_port")) || 993,
+            imap_use_ssl: $("imap_use_ssl").checked,
+            imap_send_id: $("imap_send_id").checked,
+            imap_id_name: getValue("imap_id_name") || "XEmail",
+            imap_id_version: getValue("imap_id_version") || "0.1.0",
+            imap_id_vendor: getValue("imap_id_vendor") || "XEmail",
+            imap_id_support_email:
+              getValue("imap_id_support_email") || "support@example.com",
+            signature: $("signature").value || "",
+          },
+          sync: {
+            sync_sent: $("sync_sent").checked,
+            sync_flags: $("sync_flags").checked,
+            sync_deletes: $("sync_deletes").checked,
+            sync_folders: $("sync_folders").checked,
+            fetch_days: clampFetchDays($("fetch_days").value),
+          },
+        };
+      }
+
+      function clampFetchDays(raw) {
+        const n = Number(raw);
+        if (!Number.isFinite(n)) return 30;
+        return Math.min(100, Math.max(1, Math.floor(n)));
+      }
+
+      async function saveConfig(successMessage) {
+        const btn = $("btn_save");
+        btn.disabled = true;
+        const oldText = btn.textContent;
+        btn.textContent = t("保存中…");
+        try {
+          const payload = buildPayload();
+          let savedMessage;
+          if (editingId) {
+            await api(`/api/accounts/${encodeURIComponent(editingId)}`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            });
+            savedMessage = successMessage || t("账号已保存");
+          } else {
+            const created = await api("/api/accounts", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            });
+            editingId = created.id;
+            savedMessage = successMessage || t("账号已创建");
+          }
+          // In admin-override mode there's no "list" to return to — the
+          // page was entered specifically to edit one foreign account.
+          // After save we keep the user on the form so they can see the
+          // updated banner / fields, with a success notice.
+          if (ADMIN_EDIT) {
+            try {
+              const refreshed = await api(
+                `/api/accounts/${encodeURIComponent(editingId)}`
+              );
+              ADMIN_EDIT.account = refreshed;
+              loadAccountIntoForm(refreshed);
+              updateFormModeBanner();
+            } catch (_) {
+              /* non-fatal — banner stays as-is */
+            }
+            const suffix = I18n.getLang() === "en"
+              ? " (written to the user's account config)"
+              : "（已写入用户的账号配置）";
+            setStatus(savedMessage + suffix, "success");
+            return true;
+          }
+          await loadAccounts(true);
+          // Save succeeded → return to the list so the user can see the new
+          // / updated row and pick their next action. The empty-hint and
+          // banners stay on the form; we reset both by switching views.
+          showListView();
+          applyImportCardVisibility();
+          setStatus(savedMessage, "success");
+          return true;
+        } catch (err) {
+          setStatus(err.message, "error");
+          return false;
+        } finally {
+          btn.disabled = false;
+          btn.textContent = oldText;
+        }
+      }
+
+      async function diagnoseConnection() {
+        const btn = $("btn_diag");
+        const wrap = $("diagnose_wrap");
+        const summary = $("diagnose_summary");
+        const detail = $("diagnose_result");
+        btn.disabled = true;
+        const oldText = btn.textContent;
+        btn.textContent = t("诊断中…");
+        wrap.style.display = "block";
+        summary.innerHTML = "";
+        detail.textContent = t("诊断中，请稍候...");
+        const lang = I18n.getLang();
+        const rawLabel = lang === "en" ? "raw" : "原始";
+        try {
+          const result = await api("/api/diagnose", { method: "POST" });
+          const smtp = result.smtp || {};
+          const imap = result.imap || {};
+          summary.innerHTML = `
+            <span class="pill ${smtp.ok ? "ok" : "fail"}">SMTP ${smtp.ok ? t("通过") : t("失败")}</span>
+            <span class="pill ${imap.ok ? "ok" : "fail"}">IMAP ${imap.ok ? t("通过") : t("失败")}</span>
+          `;
+          const lines = [
+            `[SMTP] ${smtp.ok ? t("通过") : t("失败")}`,
+            `  ${smtp.message || "-"}`,
+            smtp.raw_detail ? `  ${rawLabel}: ${smtp.raw_detail}` : "",
+            "",
+            `[IMAP] ${imap.ok ? t("通过") : t("失败")}`,
+            `  ${imap.message || "-"}`,
+            imap.raw_detail ? `  ${rawLabel}: ${imap.raw_detail}` : "",
+          ].filter(Boolean);
+          detail.textContent = lines.join("\n");
+          if (smtp.ok && imap.ok) {
+            setStatus(t("连接诊断通过：SMTP 与 IMAP 均可用"), "success");
+          } else {
+            setStatus(t("连接诊断完成：请根据失败项提示修正配置"), "error");
+          }
+        } catch (err) {
+          detail.textContent = err.message || t("诊断失败");
+          setStatus(err.message, "error");
+        } finally {
+          btn.disabled = false;
+          btn.textContent = oldText;
+        }
+      }
+
+      // Reflect sync mode in shortcut buttons when the user toggles a checkbox
+      // directly (custom configuration goes back to neither shortcut active).
+      ["sync_sent", "sync_flags", "sync_deletes", "sync_folders"].forEach(
+        (id) => $(id).addEventListener("change", updateSyncShortcutState)
+      );
+
+      async function loadLlmConfig() {
+        const hint = $("llm_api_key_hint");
+        const input = $("llm_api_key");
+        const saveBtn = $("btn_save_llm");
+        const lang = I18n.getLang();
+        try {
+          const data = await api("/api/llm-config");
+          if (data.configured) {
+            const provider = data.provider || "DeepSeek";
+            const model = data.model || "";
+            hint.textContent = lang === "en"
+              ? `Configured (${provider} · ${model}). To replace it, enter a new API Key and save.`
+              : `当前已配置（${provider} · ${model}）。如需更换，请在此输入新的 API Key 后保存。`;
+            hint.style.color = "var(--success)";
+            input.placeholder = t("已配置 · 输入新的 Key 以替换");
+          } else {
+            const model = data.model || "deepseek-chat";
+            hint.textContent = lang === "en"
+              ? `Not configured. Please enter a valid DeepSeek API Key (${model}).`
+              : `尚未配置。请填写一个有效的 DeepSeek API Key（${model}）。`;
+            hint.style.color = "var(--danger)";
+          }
+          // Non-admins can read status but cannot edit.
+          if (!isAdmin()) {
+            input.disabled = true;
+            saveBtn.disabled = true;
+            saveBtn.title = t("仅管理员可修改");
+            hint.textContent += t("（仅管理员可修改）");
+          }
+        } catch (err) {
+          hint.textContent = t("加载失败：") + err.message;
+          hint.style.color = "var(--danger)";
+        }
+      }
+
+      async function saveLlmConfig() {
+        const input = $("llm_api_key");
+        const statusEl = $("llm_status");
+        const btn = $("btn_save_llm");
+        const key = input.value.trim();
+        statusEl.classList.remove("error", "success");
+        if (!key) {
+          statusEl.textContent = t("API Key 不能为空");
+          statusEl.classList.add("error");
+          input.focus();
+          return;
+        }
+        const oldText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = t("保存中…");
+        try {
+          await api("/api/llm-config", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ api_key: key }),
+          });
+          statusEl.textContent = t("已保存 DeepSeek API Key");
+          statusEl.classList.add("success");
+          input.value = "";
+          await loadLlmConfig();
+        } catch (err) {
+          statusEl.textContent = err.message || t("保存失败");
+          statusEl.classList.add("error");
+        } finally {
+          btn.disabled = false;
+          btn.textContent = oldText;
+        }
+      }
+
+      // ============ language picker ============
+      function setupLanguagePicker() {
+        const cur = I18n.getLang();
+        const radios = document.querySelectorAll('input[name="ui_lang"]');
+        radios.forEach((r) => {
+          r.checked = r.value === cur;
+          r.addEventListener("change", () => {
+            if (!r.checked) return;
+            I18n.setLang(r.value);
+            const s = $("lang_status");
+            if (s) {
+              s.textContent = r.value === "en" ? I18n.t("已切换为英文") : I18n.t("已切换为中文");
+              s.classList.remove("error");
+              s.classList.add("success");
+            }
+            // Re-render account list so dynamic strings (badges, button labels)
+            // reflect the new language.
+            renderAccountList();
+            updateSyncShortcutState();
+            updateFormModeBanner();
+          });
+        });
+      }
+
+      (async () => {
+        setupLanguagePicker();
+        const ok = await bootstrapAuth();
+        if (!ok) return;
+        loadLlmConfig();
+
+        // Detect admin's "act on behalf of" entry point. The /admin page
+        // sends them here with ?edit_account=ID&owner_username=X&return_to=/admin
+        // so we can fetch that one account (admin endpoint) and present it
+        // with a clear warning banner. No interference with the normal flow.
+        const params = new URLSearchParams(window.location.search);
+        const overrideId = params.get("edit_account");
+        if (overrideId && isAdmin()) {
+          try {
+            const acc = await api(`/api/accounts/${encodeURIComponent(overrideId)}`);
+            ADMIN_EDIT = {
+              account: acc,
+              ownerUsername: params.get("owner_username") || "",
+              returnTo: params.get("return_to") || "/admin",
+            };
+            editingId = overrideId;
+            loadAccountIntoForm(acc);
+            updateFormModeBanner();
+            showFormView();
+            return;
+          } catch (err) {
+            const prefix = I18n.getLang() === "en" ? "Failed to load account: " : "无法加载该账号：";
+            setStatus(prefix + err.message, "error");
+            // Fall through to normal list view.
+          }
+        }
+        loadAccounts();
+      })();
+
+      function applyImportCardVisibility() {
+        // Per-account import targets the account-id we're editing. Show only
+        // when editing an existing account (creating == no id yet to attach to).
+        const card = $("account_import_card");
+        if (card) card.style.display = editingId ? "" : "none";
+      }
+
+      function currentAccountLabel() {
+        if (!editingId) return t("当前账号");
+        const acc = accountsCache.accounts.find((a) => a.id === editingId);
+        return (acc && (acc.label || acc.settings?.sender_email)) || t("当前账号");
+      }
+
+      async function importPrompts() {
+        const input = $("import_prompts_file");
+        const btn = $("btn_import_prompts");
+        const statusEl = $("import_prompts_status");
+        statusEl.classList.remove("error", "success");
+        const lang = I18n.getLang();
+        if (!editingId) {
+          statusEl.textContent = t("请先保存账号后再导入。");
+          statusEl.classList.add("error");
+          return;
+        }
+        const f = input.files && input.files[0];
+        if (!f) {
+          statusEl.textContent = t("请先选择一个 prompts.json 文件。");
+          statusEl.classList.add("error");
+          return;
+        }
+        const confMsg = lang === "en"
+          ? `Import "${f.name}" into account "${currentAccountLabel()}"?\n` +
+            "This account's existing prompts, fixed rules, experience and field configs will be replaced; other accounts and the global system prompt are not affected.\nThis action cannot be undone."
+          : `确认把「${f.name}」导入到账号「${currentAccountLabel()}」？\n` +
+            "本账号现有的用户提示、固定规则、经验、字段配置将被替换；其它账号与全局系统提示不受影响。\n该操作不可撤销。";
+        if (!window.confirm(confMsg)) return;
+        const oldText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = t("导入中…");
+        try {
+          const fd = new FormData();
+          fd.append("file", f);
+          const res = await fetch(
+            `/api/accounts/${encodeURIComponent(editingId)}/import/prompts`,
+            {
+              method: "POST",
+              credentials: "same-origin",
+              body: fd,
+            }
+          );
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(formatApiError(data) || `HTTP ${res.status}`);
+          const s = data.summary || {};
+          statusEl.textContent = lang === "en"
+            ? `Import succeeded: ${s.items ?? 0} prompts / ${s.fixed_rules ?? 0} fixed rules / ${s.experiences ?? 0} experiences` +
+              (s.field_configs ? " / field configs overwritten" : "")
+            : `导入成功：${s.items ?? 0} 条提示 / ${s.fixed_rules ?? 0} 条固定规则 / ${s.experiences ?? 0} 条经验` +
+              (s.field_configs ? " / 已覆盖字段配置" : "");
+          statusEl.classList.add("success");
+          input.value = "";
+        } catch (err) {
+          statusEl.textContent = t("导入失败：") + (err.message || t("未知错误"));
+          statusEl.classList.add("error");
+        } finally {
+          btn.disabled = false;
+          btn.textContent = oldText;
+        }
+      }
+
+      async function importFolders() {
+        const input = $("import_folders_file");
+        const btn = $("btn_import_folders");
+        const statusEl = $("import_folders_status");
+        statusEl.classList.remove("error", "success");
+        const lang = I18n.getLang();
+        if (!editingId) {
+          statusEl.textContent = t("请先保存账号后再导入。");
+          statusEl.classList.add("error");
+          return;
+        }
+        const f = input.files && input.files[0];
+        if (!f) {
+          statusEl.textContent = t("请先选择一个 folders.json 文件。");
+          statusEl.classList.add("error");
+          return;
+        }
+        const confMsg = lang === "en"
+          ? `Import "${f.name}" into account "${currentAccountLabel()}"?\n` +
+            "This account's existing folder list will be replaced; other accounts are not affected.\nThis action cannot be undone."
+          : `确认把「${f.name}」导入到账号「${currentAccountLabel()}」？\n` +
+            "本账号现有的文件夹列表将被替换；其它账号不受影响。\n该操作不可撤销。";
+        if (!window.confirm(confMsg)) return;
+        const oldText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = t("导入中…");
+        try {
+          const fd = new FormData();
+          fd.append("file", f);
+          const res = await fetch(
+            `/api/accounts/${encodeURIComponent(editingId)}/import/folders`,
+            {
+              method: "POST",
+              credentials: "same-origin",
+              body: fd,
+            }
+          );
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(formatApiError(data) || `HTTP ${res.status}`);
+          const s = data.summary || {};
+          statusEl.textContent = lang === "en"
+            ? `Import succeeded: ${s.total_folders ?? 0} folders (attached to this account).`
+            : `导入成功：${s.total_folders ?? 0} 个文件夹（已附加到本账号）。`;
+          statusEl.classList.add("success");
+          input.value = "";
+        } catch (err) {
+          statusEl.textContent = t("导入失败：") + (err.message || t("未知错误"));
+          statusEl.classList.add("error");
+        } finally {
+          btn.disabled = false;
+          btn.textContent = oldText;
+        }
+      }
+
+    </script>
+  </body>
+</html>

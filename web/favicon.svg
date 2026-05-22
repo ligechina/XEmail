@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="XEmail">
+  <defs>
+    <linearGradient id="favBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#1d4ed8"/>
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="7" ry="7" fill="url(#favBg)"/>
+  <!-- envelope outline -->
+  <rect x="5" y="9" width="22" height="14" rx="2" ry="2"
+        fill="none" stroke="#ffffff" stroke-width="1.8"/>
+  <!-- envelope flap / X top -->
+  <path d="M5.5 9.5 L16 17 L26.5 9.5"
+        fill="none" stroke="#ffffff" stroke-width="1.8"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- X bottom -->
+  <path d="M5.5 22.5 L12 15.5 M26.5 22.5 L20 15.5"
+        fill="none" stroke="#ffffff" stroke-width="1.8"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

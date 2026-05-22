@@ -1,0 +1,679 @@
+<!--
+  Copyright (c) 2026 Peking University & Beijing Siliconheart Technology Co., Ltd.
+  XEmail is licensed under Mulan PSL v2.
+  You can use this software according to the terms and conditions of the Mulan PSL v2.
+  You may obtain a copy of Mulan PSL v2 at:
+           http://license.coscl.org.cn/MulanPSL2
+  THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
+  EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+  MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
+  See the Mulan PSL v2 for more details.
+-->
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>通讯录 · XEmail</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="alternate icon" href="/favicon.ico" />
+    <style>
+      :root {
+        --bg: #f5f6f8;
+        --surface: #ffffff;
+        --surface-muted: #fafbfc;
+        --border: #e4e6eb;
+        --border-strong: #d4d7dd;
+        --text: #1f2328;
+        --text-muted: #6b7280;
+        --text-subtle: #9aa1ad;
+        --primary: #2563eb;
+        --primary-hover: #1d4ed8;
+        --primary-soft: #e8efff;
+        --danger: #dc2626;
+        --success: #16a34a;
+        --radius: 8px;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      header.topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 18px;
+        background: var(--surface);
+        border-bottom: 1px solid var(--border);
+        height: 56px;
+        position: sticky;
+        top: 0;
+        z-index: 10;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-weight: 600;
+        font-size: 16px;
+      }
+      .brand .logo { width: 28px; height: 28px; flex-shrink: 0; }
+      .btn {
+        font: inherit;
+        padding: 7px 14px;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: var(--text);
+        cursor: pointer;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        transition: background 0.12s, border-color 0.12s;
+      }
+      .btn:hover { background: var(--surface-muted); border-color: var(--border-strong); }
+      .btn-primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+      .btn-primary:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
+      .btn-danger { color: var(--danger); border-color: var(--danger); }
+      .btn-danger:hover { background: #fef2f2; }
+      .btn-ghost { border-color: transparent; background: transparent; }
+      .btn-ghost:hover { background: var(--surface-muted); }
+      .container { max-width: 1080px; margin: 24px auto 60px; padding: 0 20px; }
+      .page-head { margin-bottom: 18px; display: flex; align-items: end; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+      .page-head h1 { margin: 0 0 4px; font-size: 22px; }
+      .page-head p { margin: 0; color: var(--text-muted); font-size: 13px; }
+      .layout {
+        display: grid;
+        grid-template-columns: 220px 1fr;
+        gap: 18px;
+        align-items: start;
+      }
+      @media (max-width: 720px) {
+        .layout { grid-template-columns: 1fr; }
+      }
+      .sidebar {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 12px;
+        position: sticky;
+        top: 70px;
+      }
+      .sidebar h3 {
+        margin: 4px 6px 8px;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .filter-item {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+        padding: 7px 10px;
+        border-radius: 6px;
+        cursor: pointer;
+        user-select: none;
+        color: var(--text);
+      }
+      .filter-item:hover { background: var(--surface-muted); }
+      .filter-item.active { background: var(--primary-soft); color: var(--primary); font-weight: 600; }
+      .filter-item .count {
+        font-size: 11px;
+        color: var(--text-subtle);
+        background: var(--surface-muted);
+        padding: 1px 7px;
+        border-radius: 999px;
+      }
+      .filter-item.active .count { color: var(--primary); background: #fff; }
+      .main-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 18px 20px;
+      }
+      .toolbar {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 14px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .toolbar input[type="search"] {
+        flex: 1;
+        min-width: 200px;
+        padding: 7px 10px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        font: inherit;
+      }
+      .toolbar input[type="search"]:focus {
+        outline: none;
+        border-color: var(--primary);
+        box-shadow: 0 0 0 2px var(--primary-soft);
+      }
+      .count-label {
+        color: var(--text-muted);
+        font-size: 12px;
+        margin-left: auto;
+      }
+      table.contact-list {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13.5px;
+      }
+      table.contact-list thead th {
+        text-align: left;
+        font-weight: 600;
+        font-size: 12px;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        padding: 8px 10px;
+        border-bottom: 1px solid var(--border);
+      }
+      table.contact-list tbody td {
+        padding: 10px;
+        border-bottom: 1px solid var(--border);
+        vertical-align: top;
+      }
+      table.contact-list tbody tr:last-child td { border-bottom: 0; }
+      table.contact-list tbody tr:hover { background: var(--surface-muted); }
+      .name-cell { font-weight: 600; }
+      .name-cell .empty-name { color: var(--text-subtle); font-weight: 400; }
+      .email-cell { color: var(--text-muted); word-break: break-all; }
+      .tags-cell { display: flex; flex-wrap: wrap; gap: 4px; }
+      .tag-chip {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: var(--primary-soft);
+        color: var(--primary);
+        font-size: 11.5px;
+      }
+      .note-cell {
+        color: var(--text-muted);
+        font-size: 12.5px;
+        white-space: pre-wrap;
+        max-width: 280px;
+      }
+      .actions-cell {
+        text-align: right;
+        white-space: nowrap;
+      }
+      .actions-cell button { margin-left: 4px; }
+      .empty {
+        padding: 60px 20px;
+        text-align: center;
+        color: var(--text-subtle);
+        font-size: 13.5px;
+      }
+      .empty .big { font-size: 36px; opacity: 0.5; margin-bottom: 6px; }
+
+      /* modal */
+      .modal-backdrop {
+        position: fixed;
+        inset: 0;
+        background: rgba(15, 23, 42, 0.45);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        z-index: 100;
+        padding: 20px;
+      }
+      .modal-backdrop.open { display: flex; }
+      .modal {
+        background: var(--surface);
+        border-radius: 10px;
+        width: 520px;
+        max-width: 100%;
+        max-height: 90vh;
+        overflow: auto;
+        padding: 18px 20px;
+        box-shadow: 0 12px 40px rgba(15, 23, 42, 0.2);
+      }
+      .modal h2 { margin: 0 0 12px; font-size: 16px; }
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        margin-bottom: 12px;
+      }
+      .field label {
+        font-size: 12px;
+        color: var(--text-muted);
+        font-weight: 600;
+      }
+      .field input,
+      .field textarea {
+        font: inherit;
+        padding: 8px 10px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--surface);
+        color: var(--text);
+      }
+      .field input:focus,
+      .field textarea:focus {
+        outline: none;
+        border-color: var(--primary);
+        box-shadow: 0 0 0 2px var(--primary-soft);
+      }
+      .field textarea { min-height: 80px; resize: vertical; }
+      .field-hint { font-size: 11.5px; color: var(--text-subtle); }
+      .modal-actions {
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+        margin-top: 14px;
+      }
+      .status {
+        position: fixed;
+        bottom: 16px;
+        right: 16px;
+        padding: 10px 14px;
+        border-radius: 8px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        box-shadow: 0 4px 16px rgba(15, 23, 42, 0.12);
+        font-size: 13px;
+        max-width: 360px;
+        display: none;
+      }
+      .status.show { display: block; }
+      .status.success { border-color: var(--success); }
+      .status.error { border-color: var(--danger); color: var(--danger); }
+    </style>
+    <script src="/i18n.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <img class="logo" src="/logo.svg" alt="XEmail" />
+        <span>XEmail</span>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button
+          class="btn"
+          type="button"
+          onclick="closeTab()"
+          title="关闭本页"
+        >✕ 关闭</button>
+      </div>
+    </header>
+
+    <main class="container">
+      <div class="page-head">
+        <div>
+          <h1>📇 通讯录</h1>
+          <p>
+            当前账号 <span id="active_account_name">…</span> 的联系人。新增 /
+            编辑 / 删除均只影响该账号。
+          </p>
+        </div>
+        <button class="btn btn-primary" onclick="openContactModal()">+ 新建联系人</button>
+      </div>
+
+      <div class="layout">
+        <aside class="sidebar">
+          <h3>标签</h3>
+          <div id="tag_list">
+            <div class="filter-item active" data-tag="" onclick="selectTag('')">
+              <span>全部</span>
+              <span class="count" id="count_all">0</span>
+            </div>
+          </div>
+        </aside>
+
+        <section class="main-card">
+          <div class="toolbar">
+            <input
+              id="search_input"
+              type="search"
+              placeholder="搜索姓名 / 邮箱 / 备注 / 标签…"
+              oninput="renderList()"
+            />
+            <span class="count-label" id="count_label">0 位联系人</span>
+          </div>
+          <div id="list_wrap">
+            <div class="empty">加载中…</div>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <!-- add/edit modal -->
+    <div class="modal-backdrop" id="modal_backdrop" onclick="onBackdropClick(event)">
+      <div class="modal" onclick="event.stopPropagation()">
+        <h2 id="modal_title">新建联系人</h2>
+        <div class="field">
+          <label for="m_name">姓名</label>
+          <input id="m_name" type="text" maxlength="120" placeholder="例如：李戈" />
+        </div>
+        <div class="field">
+          <label for="m_email">邮箱<span style="color:var(--danger)">*</span></label>
+          <input id="m_email" type="email" maxlength="200" placeholder="someone@example.com" required />
+        </div>
+        <div class="field">
+          <label for="m_tags">标签</label>
+          <input id="m_tags" type="text" placeholder="多个标签用英文逗号分隔，例如：同事, 项目A" />
+          <div class="field-hint">用于在左侧"标签"栏快速筛选。最多 16 个，每个 ≤ 32 字符。</div>
+        </div>
+        <div class="field">
+          <label for="m_note">备注</label>
+          <textarea id="m_note" maxlength="2000" placeholder="可选：自由文字"></textarea>
+        </div>
+        <div class="modal-actions">
+          <button class="btn" onclick="closeContactModal()">取消</button>
+          <button class="btn btn-primary" id="modal_save" onclick="saveContact()">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="status" id="status"></div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+
+      // "✕ 关闭": close this tab. Works when opened from the inbox
+      // topbar (target=_blank); silently no-ops on direct URL access.
+      function closeTab() {
+        try { window.close(); } catch (_) {}
+      }
+
+      let CONTACTS = [];
+      let ACTIVE_TAG = "";
+      let EDITING_ID = null;
+      let SAVING = false;
+
+      function setStatus(msg, kind) {
+        const el = $("status");
+        el.textContent = msg;
+        el.classList.remove("success", "error");
+        if (kind === "success") el.classList.add("success");
+        if (kind === "error") el.classList.add("error");
+        el.classList.add("show");
+        clearTimeout(setStatus._t);
+        setStatus._t = setTimeout(() => el.classList.remove("show"), 2400);
+      }
+
+      function escapeHtml(s) {
+        return String(s ?? "").replace(/[&<>"']/g, (c) => ({
+          "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+        }[c]));
+      }
+
+      async function api(url, opts) {
+        const res = await fetch(url, opts);
+        if (res.status === 401) {
+          window.location.href = "/login";
+          return;
+        }
+        if (!res.ok) {
+          let detail = `HTTP ${res.status}`;
+          try {
+            const j = await res.json();
+            detail = j.detail || JSON.stringify(j);
+          } catch (e) {}
+          throw new Error(detail);
+        }
+        return res.json();
+      }
+
+      async function bootstrap() {
+        try {
+          const me = await api("/api/auth/me");
+          if (!me) return;
+        } catch (err) {
+          // unauthenticated; api() already redirected to /login
+          return;
+        }
+        try {
+          const resp = await api("/api/accounts");
+          const accounts = (resp && resp.accounts) || [];
+          const activeId = resp && resp.active_account_id;
+          const active = accounts.find((a) => a.id === activeId) || accounts[0];
+          $("active_account_name").textContent = active
+            ? (active.label || active.settings?.sender_email || t("未命名账号"))
+            : t("未激活");
+        } catch (e) {
+          $("active_account_name").textContent = "—";
+        }
+        await loadContacts();
+      }
+
+      async function loadContacts() {
+        try {
+          CONTACTS = (await api("/api/contacts")) || [];
+        } catch (err) {
+          setStatus(err.message, "error");
+          CONTACTS = [];
+        }
+        renderTags();
+        renderList();
+      }
+
+      function renderTags() {
+        const tagCounts = new Map();
+        for (const c of CONTACTS) {
+          for (const t of c.tags || []) {
+            tagCounts.set(t, (tagCounts.get(t) || 0) + 1);
+          }
+        }
+        const tags = [...tagCounts.entries()].sort((a, b) =>
+          a[0].localeCompare(b[0], "zh-Hans-CN")
+        );
+        const wrap = $("tag_list");
+        const allEl = `
+          <div class="filter-item ${ACTIVE_TAG === "" ? "active" : ""}" data-tag="" onclick="selectTag('')">
+            <span>${t("全部")}</span>
+            <span class="count">${CONTACTS.length}</span>
+          </div>`;
+        const untagged = CONTACTS.filter((c) => !c.tags || c.tags.length === 0).length;
+        const untaggedEl = untagged
+          ? `<div class="filter-item ${ACTIVE_TAG === "__untagged__" ? "active" : ""}" data-tag="__untagged__" onclick="selectTag('__untagged__')">
+              <span>${t("未分组")}</span>
+              <span class="count">${untagged}</span>
+            </div>`
+          : "";
+        const tagEls = tags
+          .map(
+            ([t, n]) => `
+              <div class="filter-item ${ACTIVE_TAG === t ? "active" : ""}" data-tag="${escapeHtml(t)}" onclick="selectTag(${JSON.stringify(t)})">
+                <span>${escapeHtml(t)}</span>
+                <span class="count">${n}</span>
+              </div>`
+          )
+          .join("");
+        wrap.innerHTML = allEl + untaggedEl + tagEls;
+      }
+
+      function selectTag(tag) {
+        ACTIVE_TAG = tag;
+        renderTags();
+        renderList();
+      }
+
+      function renderList() {
+        const q = ($("search_input").value || "").trim().toLowerCase();
+        let items = CONTACTS.slice();
+        if (ACTIVE_TAG === "__untagged__") {
+          items = items.filter((c) => !c.tags || c.tags.length === 0);
+        } else if (ACTIVE_TAG) {
+          items = items.filter((c) => (c.tags || []).includes(ACTIVE_TAG));
+        }
+        if (q) {
+          items = items.filter((c) => {
+            const hay = [
+              c.name || "",
+              c.email || "",
+              (c.tags || []).join(" "),
+              c.note || "",
+            ]
+              .join(" ")
+              .toLowerCase();
+            return hay.includes(q);
+          });
+        }
+        const suffix = t("位联系人");
+        $("count_label").textContent = q || ACTIVE_TAG
+          ? `${items.length} / ${CONTACTS.length}${suffix}`
+          : `${CONTACTS.length}${suffix}`;
+        const wrap = $("list_wrap");
+        if (items.length === 0) {
+          const hint = CONTACTS.length === 0
+            ? t("通讯录为空，点击右上「+ 新建联系人」开始添加。")
+            : t("没有匹配的联系人。");
+          wrap.innerHTML = `<div class="empty"><div class="big">📭</div>${hint}</div>`;
+          return;
+        }
+        wrap.innerHTML = `
+          <table class="contact-list">
+            <thead>
+              <tr>
+                <th style="width:22%">${t("姓名")}</th>
+                <th style="width:30%">${t("邮箱")}</th>
+                <th style="width:22%">${t("标签")}</th>
+                <th>${t("备注")}</th>
+                <th style="width:120px"></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${items.map(renderRow).join("")}
+            </tbody>
+          </table>`;
+        wrap.querySelectorAll("[data-edit]").forEach((b) => {
+          b.onclick = () => openContactModal(b.dataset.edit);
+        });
+        wrap.querySelectorAll("[data-del]").forEach((b) => {
+          b.onclick = () => deleteContact(b.dataset.del);
+        });
+      }
+
+      function renderRow(c) {
+        const name = c.name
+          ? escapeHtml(c.name)
+          : `<span class="empty-name">${t("(未填写)")}</span>`;
+        const tagsHtml = (c.tags || [])
+          .map((tag) => `<span class="tag-chip">${escapeHtml(tag)}</span>`)
+          .join("");
+        return `
+          <tr>
+            <td class="name-cell">${name}</td>
+            <td class="email-cell">${escapeHtml(c.email || "")}</td>
+            <td><div class="tags-cell">${tagsHtml}</div></td>
+            <td class="note-cell">${escapeHtml(c.note || "")}</td>
+            <td class="actions-cell">
+              <button class="btn" data-edit="${escapeHtml(c.id)}">${t("编辑")}</button>
+              <button class="btn btn-danger" data-del="${escapeHtml(c.id)}">${t("删除")}</button>
+            </td>
+          </tr>`;
+      }
+
+      function openContactModal(id) {
+        EDITING_ID = id || null;
+        const c = id ? CONTACTS.find((x) => x.id === id) : null;
+        $("modal_title").textContent = c ? t("编辑联系人") : t("新建联系人");
+        $("m_name").value = c?.name || "";
+        $("m_email").value = c?.email || "";
+        $("m_tags").value = (c?.tags || []).join(", ");
+        $("m_note").value = c?.note || "";
+        $("modal_save").disabled = false;
+        $("modal_save").textContent = t("保存");
+        $("modal_backdrop").classList.add("open");
+        setTimeout(() => $("m_name").focus(), 30);
+      }
+
+      function closeContactModal() {
+        $("modal_backdrop").classList.remove("open");
+        EDITING_ID = null;
+      }
+
+      function onBackdropClick(e) {
+        if (e.target.id === "modal_backdrop") closeContactModal();
+      }
+
+      function parseTagsInput(raw) {
+        return String(raw || "")
+          .split(/[,，]/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+      }
+
+      async function saveContact() {
+        if (SAVING) return;
+        const name = $("m_name").value.trim();
+        const email = $("m_email").value.trim();
+        const tags = parseTagsInput($("m_tags").value);
+        const note = $("m_note").value.trim();
+        if (!email) {
+          setStatus(t("请填写邮箱地址"), "error");
+          $("m_email").focus();
+          return;
+        }
+        SAVING = true;
+        $("modal_save").disabled = true;
+        $("modal_save").textContent = t("保存中…");
+        try {
+          if (EDITING_ID) {
+            await api(`/api/contacts/${encodeURIComponent(EDITING_ID)}`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ name, email, tags, note }),
+            });
+          } else {
+            await api(`/api/contacts`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ name, email, tags, note }),
+            });
+          }
+          setStatus(EDITING_ID ? t("已更新") : t("已新建"), "success");
+          closeContactModal();
+          await loadContacts();
+        } catch (err) {
+          setStatus(err.message, "error");
+        } finally {
+          SAVING = false;
+          $("modal_save").disabled = false;
+          $("modal_save").textContent = t("保存");
+        }
+      }
+
+      async function deleteContact(id) {
+        const c = CONTACTS.find((x) => x.id === id);
+        if (!c) return;
+        const label = c.name || c.email;
+        const lang = I18n.getLang();
+        const msg = lang === "en"
+          ? `Delete contact "${label}"? This action cannot be undone.`
+          : `确认删除联系人「${label}」？此操作不可撤销。`;
+        if (!confirm(msg)) return;
+        try {
+          await api(`/api/contacts/${encodeURIComponent(id)}`, { method: "DELETE" });
+          setStatus(t("已删除"), "success");
+          await loadContacts();
+        } catch (err) {
+          setStatus(err.message, "error");
+        }
+      }
+
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && $("modal_backdrop").classList.contains("open")) {
+          closeContactModal();
+        }
+      });
+
+      bootstrap();
+    </script>
+  </body>
+</html>

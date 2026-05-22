@@ -1,0 +1,27 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+._*
+
+# IDE
+.idea/
+.vscode/
+.claude/
+
+# Release packaging output
+dist/
+
+# Local runtime data — never commit user mail, credentials, or runtime logs.
+# Everything under data/ is ignored except the placeholders and the example
+# config file that ships with the repo.
+data/*
+!data/.gitkeep
+!data/attachments/
+!data/config.example.json
+data/attachments/*
+!data/attachments/.gitkeep
