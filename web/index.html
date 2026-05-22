@@ -5792,7 +5792,7 @@
             (ccAddrs.length >= 1 && toAddrs.length >= 1);
           if (showReplyAll) {
             out.push({
-              label: "↩↩ 全部回复",
+              label: "全部回复",
               action: () => replyAllToEmail(item),
             });
           }
@@ -6896,7 +6896,7 @@
               </div>
               <div class="detail-header-actions">
                 <button class="btn btn-primary" data-act="reply">↩ 回复</button>
-                ${showReplyAll ? '<button class="btn" data-act="reply_all" title="${t("把所有收件人/抄送的人一起放入回复的收件人")}">${t("↩↩ 全部回复")}</button>' : ""}
+                ${showReplyAll ? '<button class="btn" data-act="reply_all" title="把所有收件人/抄送的人一起放入回复的收件人">全部回复</button>' : ""}
                 <button class="btn" data-act="forward" title="${t("转发此邮件")}">${t("➡ 转发")}</button>
                 <button class="${importantBtnCls}" data-act="important">${importantLabel}</button>
                 ${handledBtnHtml}
@@ -7170,7 +7170,7 @@
             </div>
             <div class="detail-header-actions">
               <button class="btn btn-primary" id="btn_reply">↩ 回复</button>
-              ${showReplyAll ? '<button class="btn" id="btn_reply_all" title="${t("把所有收件人/抄送的人一起放入回复的收件人")}">${t("↩↩ 全部回复")}</button>' : ""}
+              ${showReplyAll ? '<button class="btn" id="btn_reply_all" title="把所有收件人/抄送的人一起放入回复的收件人">全部回复</button>' : ""}
               <button class="btn" id="btn_forward" title="${t("转发此邮件")}">${t("➡ 转发")}</button>
               <button class="${importantBtnCls}" id="btn_important">${importantLabel}</button>
               ${handledBtnHtml}
