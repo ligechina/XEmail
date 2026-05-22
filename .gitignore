@@ -13,9 +13,6 @@ __pycache__/
 .vscode/
 .claude/
 
-# Release packaging output
-dist/
-
 # Local runtime data — never commit user mail, credentials, or runtime logs.
 # Everything under data/ is ignored except the placeholders and the example
 # config file that ships with the repo.
