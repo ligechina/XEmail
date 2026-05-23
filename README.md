@@ -9,13 +9,6 @@ XEmail 是一个本地运行的智能邮件助手：一个 FastAPI 后端 + 纯�
 > ⚠️ XEmail 把账号配置（含邮箱授权码）和邮件正文都存在本机的 `data/` 目录下。
 > 仅推荐在个人电脑或受信任的内网环境运行，不要把 `data/` 暴露到公网或提交到 Git。
 
-## 安装包说明
-
-发布包默认位于项目根目录下的 `dist/`：
-
-- `xemail-macos-installer-*.pkg`：macOS 双击安装包（安装到 `/Applications/XEmail`）。
-- `xemail-windows-installer-*.zip`：Windows 安装包（解压后运行 `install_windows.bat`）。
-- `xemail-release-*.tar.gz`：通用源码发布包（用于服务器部署或手动安装）。
 
 ## 主要特性
 
