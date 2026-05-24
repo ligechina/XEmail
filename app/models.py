@@ -412,6 +412,21 @@ class SystemModeUpdate(BaseModel):
     mode: str = Field(..., pattern=r"^(dev|prod)$")
 
 
+class DesktopSettingsStatus(BaseModel):
+    """Admin-only runtime view for desktop launcher preferences."""
+
+    enable_tray: bool
+    autostart_supported: bool
+    autostart_enabled: bool
+
+
+class DesktopSettingsUpdate(BaseModel):
+    """Admin-only write payload for desktop runtime preferences."""
+
+    enable_tray: Optional[bool] = None
+    autostart_enabled: Optional[bool] = None
+
+
 class LlmConfigUpdate(BaseModel):
     """Settings-page payload for setting the DeepSeek API key. Empty / blank
     is rejected at the route layer."""

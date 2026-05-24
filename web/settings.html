@@ -17,6 +17,7 @@
     <title>邮箱设置 · XEmail</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="alternate icon" href="/favicon.ico" />
+    <link rel="stylesheet" href="/runtime_status.css" />
     <style>
       :root {
         --bg: #f5f6f8;
@@ -64,6 +65,13 @@
         gap: 10px;
         font-weight: 600;
         font-size: 16px;
+      }
+      .build-version {
+        font-size: 11px;
+        color: var(--text-muted);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 1px 7px;
       }
       .brand .logo {
         width: 28px;
@@ -418,12 +426,14 @@
       }
     </style>
     <script src="/i18n.js"></script>
+    <script src="/runtime_status.js"></script>
   </head>
   <body>
     <header class="topbar">
       <div class="brand">
         <img class="logo" src="/logo.svg" alt="XEmail" />
         <span>XEmail</span>
+        <span class="build-version" id="build_version_tag">v...</span>
       </div>
       <button
         class="btn"
@@ -437,6 +447,11 @@
       <div class="page-head">
         <h1>邮箱设置</h1>
         <p>管理多个邮箱账号，可随时切换 / 编辑 / 删除。</p>
+      </div>
+      <div class="runtime-strip" id="runtime_strip">
+        <span class="runtime-pill" id="runtime_mode_pill">系统模式：加载中…</span>
+        <span class="runtime-pill" id="runtime_tray_pill" style="display:none">托盘：加载中…</span>
+        <span class="runtime-pill" id="runtime_autostart_pill" style="display:none">开机启动：加载中…</span>
       </div>
 
       <div class="card">
@@ -480,6 +495,34 @@
           </button>
         </div>
         <div class="status-line" id="llm_status"></div>
+      </div>
+
+      <div class="card" id="desktop_runtime_card" style="display: none">
+        <h2>桌面运行选项（仅管理员）</h2>
+        <p class="desc">
+          控制桌面版 XEmail 的托盘与开机启动行为。托盘开关在下次重启桌面应用后生效。
+        </p>
+        <div class="grid">
+          <div class="field full">
+            <label>
+              <input type="checkbox" id="desktop_enable_tray" />
+              启用托盘模式（关闭窗口时最小化到托盘）
+            </label>
+          </div>
+          <div class="field full">
+            <label>
+              <input type="checkbox" id="desktop_autostart_enabled" />
+              开机自动启动 XEmail 桌面版（macOS）
+            </label>
+            <div class="desc" style="margin-top: 6px" id="desktop_autostart_hint">加载中…</div>
+          </div>
+        </div>
+        <div class="actions">
+          <button class="btn btn-primary" type="button" id="btn_save_desktop_runtime" onclick="saveDesktopRuntime()">
+            保存桌面选项
+          </button>
+        </div>
+        <div class="status-line" id="desktop_runtime_status"></div>
       </div>
 
       <!-- ============== LIST VIEW ============== -->
@@ -784,14 +827,14 @@
       const $ = (id) => document.getElementById(id);
       const statusEl = $("status");
 
-      // Close this tab. When opened from the inbox topbar (target=_blank),
-      // window.close() succeeds and the user returns to the inbox tab. If
-      // the page was opened directly (typed URL / bookmark), close() is
-      // blocked by the browser and the user can just close the tab
-      // themselves — we do nothing else to avoid the "two inbox tabs"
-      // failure mode from the previous design.
+      // In desktop webview, window.close() is usually blocked by host policy.
+      // We still try close first (works for browser popups), then fall back
+      // to navigating back to inbox so "关闭" always has an effect.
       function closeTab() {
         try { window.close(); } catch (_) {}
+        setTimeout(() => {
+          if (!window.closed) window.location.href = "/";
+        }, 80);
       }
 
       function setStatus(text, level = "info") {
@@ -816,6 +859,8 @@
       }
 
       let CURRENT_USER = null;
+      let DESKTOP_RUNTIME_LAST = null;
+      let SYSTEM_MODE_LAST = null;
       function isAdmin() {
         return CURRENT_USER && CURRENT_USER.role === "admin";
       }
@@ -1391,6 +1436,117 @@
         }
       }
 
+      async function loadDesktopRuntime() {
+        const card = $("desktop_runtime_card");
+        const statusEl = $("desktop_runtime_status");
+        if (!card || !statusEl) return;
+
+        if (!isAdmin()) {
+          card.style.display = "none";
+          $("runtime_tray_pill").style.display = "none";
+          $("runtime_autostart_pill").style.display = "none";
+          return;
+        }
+
+        card.style.display = "";
+        statusEl.textContent = "";
+        statusEl.classList.remove("error", "success");
+        try {
+          const data = await api("/api/system/desktop");
+          DESKTOP_RUNTIME_LAST = data;
+          $("desktop_enable_tray").checked = !!data.enable_tray;
+          $("desktop_autostart_enabled").checked = !!data.autostart_enabled;
+          paintRuntimeDesktopPills(data);
+          const autostartHint = $("desktop_autostart_hint");
+          if (data.autostart_supported) {
+            autostartHint.textContent = data.autostart_enabled
+              ? t("当前已启用开机启动。")
+              : t("当前未启用开机启动。");
+            $("desktop_autostart_enabled").disabled = false;
+          } else {
+            autostartHint.textContent = t("当前系统不支持开机启动开关（仅 macOS 可用）。");
+            $("desktop_autostart_enabled").disabled = true;
+          }
+        } catch (err) {
+          statusEl.textContent = err.message || t("加载失败");
+          statusEl.classList.add("error");
+        }
+      }
+
+      function paintRuntimeModePill(mode) {
+        RuntimeStatus.paintModePill($("runtime_mode_pill"), mode, t);
+      }
+
+      function paintRuntimeDesktopPills(data) {
+        RuntimeStatus.paintDesktopPills({
+          trayPill: $("runtime_tray_pill"),
+          autostartPill: $("runtime_autostart_pill"),
+          data,
+          isAdmin: isAdmin(),
+          t,
+        });
+      }
+
+      async function loadSystemMode() {
+        try {
+          const data = await api("/api/system/mode");
+          SYSTEM_MODE_LAST = data.mode || "dev";
+          paintRuntimeModePill(SYSTEM_MODE_LAST);
+        } catch (err) {
+          $("runtime_mode_pill").textContent = t("系统模式：加载失败");
+        }
+      }
+
+      async function loadBuildVersion() {
+        try {
+          const data = await api("/api/system/build");
+          $("build_version_tag").textContent = `v${data.version || "dev"}`;
+        } catch (_) {
+          $("build_version_tag").textContent = "vdev";
+        }
+      }
+
+      async function saveDesktopRuntime() {
+        const statusEl = $("desktop_runtime_status");
+        const btn = $("btn_save_desktop_runtime");
+        if (!statusEl || !btn) return;
+        statusEl.textContent = "";
+        statusEl.classList.remove("error", "success");
+        if (!isAdmin()) {
+          statusEl.textContent = t("仅管理员可修改");
+          statusEl.classList.add("error");
+          return;
+        }
+
+        const payload = {
+          enable_tray: $("desktop_enable_tray").checked,
+          autostart_enabled: $("desktop_autostart_enabled").checked,
+        };
+        if (DESKTOP_RUNTIME_LAST && !DESKTOP_RUNTIME_LAST.autostart_supported) {
+          delete payload.autostart_enabled;
+        }
+
+        const oldText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = t("保存中…");
+        try {
+          await api("/api/system/desktop", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          statusEl.textContent = t("已保存桌面选项（托盘设置重启桌面应用后生效）");
+          statusEl.classList.add("success");
+          await loadDesktopRuntime();
+        } catch (err) {
+          statusEl.textContent = err.message || t("保存失败");
+          statusEl.classList.add("error");
+        } finally {
+          btn.disabled = false;
+          btn.textContent = oldText;
+        }
+      }
+
       async function saveLlmConfig() {
         const input = $("llm_api_key");
         const statusEl = $("llm_status");
@@ -1445,6 +1601,8 @@
             renderAccountList();
             updateSyncShortcutState();
             updateFormModeBanner();
+            if (SYSTEM_MODE_LAST) paintRuntimeModePill(SYSTEM_MODE_LAST);
+            if (DESKTOP_RUNTIME_LAST) paintRuntimeDesktopPills(DESKTOP_RUNTIME_LAST);
           });
         });
       }
@@ -1453,7 +1611,10 @@
         setupLanguagePicker();
         const ok = await bootstrapAuth();
         if (!ok) return;
+        loadBuildVersion();
+        loadSystemMode();
         loadLlmConfig();
+        loadDesktopRuntime();
 
         // Detect admin's "act on behalf of" entry point. The /admin page
         // sends them here with ?edit_account=ID&owner_username=X&return_to=/admin

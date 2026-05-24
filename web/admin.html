@@ -17,6 +17,7 @@
     <title>用户管理 · XEmail</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="alternate icon" href="/favicon.ico" />
+    <link rel="stylesheet" href="/runtime_status.css" />
     <style>
       :root {
         --bg: #f5f6f8;
@@ -55,6 +56,13 @@
         z-index: 10;
       }
       .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 16px; }
+      .build-version {
+        font-size: 11px;
+        color: var(--text-muted);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 1px 7px;
+      }
       .brand .logo {
         width: 28px; height: 28px;
         display: block; flex-shrink: 0;
@@ -223,12 +231,14 @@
       .mode-badge.prod { background: #ecfdf5; color: #047857; }
     </style>
     <script src="/i18n.js"></script>
+    <script src="/runtime_status.js"></script>
   </head>
   <body>
     <header class="topbar">
       <div class="brand">
         <img class="logo" src="/logo.svg" alt="XEmail" />
         XEmail · 用户管理
+        <span class="build-version" id="build_version_tag">v...</span>
       </div>
       <div class="toolbar">
         <button
@@ -256,6 +266,29 @@
           <div class="mode-hint">
             开发态会在主页显示「重新分类」「复位」等调试按钮；使用态隐藏它们，作为面向使用者的稳定版本。设置对所有用户即时生效。
           </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>桌面运行状态</h2>
+        <div class="mode-row" style="margin-bottom: 10px;">
+          <div class="runtime-badges">
+            <span id="runtime_tray_pill" class="runtime-pill">托盘：加载中…</span>
+            <span id="runtime_autostart_pill" class="runtime-pill">开机启动：加载中…</span>
+          </div>
+          <div class="mode-hint">
+            这里的设置对应桌面版（`python -m desktop`）运行行为。托盘开关在下次启动桌面应用后生效。
+          </div>
+        </div>
+        <div class="mode-row">
+          <label><input id="desktop_tray_enabled" type="checkbox" /> 启用托盘模式（关闭窗口最小化到托盘）</label>
+        </div>
+        <div class="mode-row" style="margin-top: 8px;">
+          <label><input id="desktop_autostart_enabled" type="checkbox" /> 开机自动启动 XEmail 桌面版（macOS）</label>
+        </div>
+        <div class="mode-row" style="margin-top: 10px;">
+          <button id="btn_save_desktop_runtime_admin" class="btn btn-primary" type="button">保存桌面选项</button>
+          <div id="desktop_runtime_hint" class="mode-hint">加载中…</div>
         </div>
       </div>
 
@@ -321,10 +354,13 @@
       const $ = (id) => document.getElementById(id);
       const statusEl = $("status");
 
-      // "✕ 关闭": close this tab. Works when opened from the inbox
-      // topbar (target=_blank); silently no-ops on direct URL access.
+      // In desktop webview, window.close() may be blocked. Try close first,
+      // then fall back to inbox navigation so the button still works.
       function closeTab() {
         try { window.close(); } catch (_) {}
+        setTimeout(() => {
+          if (!window.closed) window.location.href = "/";
+        }, 80);
       }
 
       function setStatus(text, level) {
@@ -372,6 +408,7 @@
       }
 
       let CURRENT_USER = null;
+      let DESKTOP_RUNTIME_LAST = null;
 
       function escapeHtml(s) {
         return String(s ?? "").replace(/[&<>"']/g, (c) =>
@@ -389,7 +426,16 @@
           window.location.replace("/");
           return;
         }
-        await Promise.all([reloadUsers(), reloadSystemMode()]);
+        await Promise.all([reloadUsers(), reloadSystemMode(), reloadDesktopRuntime()]);
+      }
+
+      async function loadBuildVersion() {
+        try {
+          const data = await api("/api/system/build");
+          $("build_version_tag").textContent = `v${data.version || "dev"}`;
+        } catch (_) {
+          $("build_version_tag").textContent = "vdev";
+        }
       }
 
       function paintModeButtons(mode) {
@@ -430,6 +476,61 @@
 
       $("btn_mode_dev").addEventListener("click", () => setSystemMode("dev"));
       $("btn_mode_prod").addEventListener("click", () => setSystemMode("prod"));
+
+      function paintDesktopRuntime(data) {
+        DESKTOP_RUNTIME_LAST = data;
+        $("desktop_tray_enabled").checked = !!data.enable_tray;
+        const autoCheckbox = $("desktop_autostart_enabled");
+        autoCheckbox.checked = !!data.autostart_enabled;
+        autoCheckbox.disabled = !data.autostart_supported;
+        RuntimeStatus.paintDesktopPills({
+          trayPill: $("runtime_tray_pill"),
+          autostartPill: $("runtime_autostart_pill"),
+          hintEl: $("desktop_runtime_hint"),
+          data,
+          isAdmin: true,
+          t,
+        });
+      }
+
+      async function reloadDesktopRuntime() {
+        try {
+          const data = await api("/api/system/desktop");
+          paintDesktopRuntime(data);
+        } catch (err) {
+          setStatus(err.message, "error");
+          $("desktop_runtime_hint").textContent = t("加载失败");
+        }
+      }
+
+      async function saveDesktopRuntime() {
+        const btn = $("btn_save_desktop_runtime_admin");
+        const oldText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = t("保存中…");
+        try {
+          const payload = {
+            enable_tray: $("desktop_tray_enabled").checked,
+            autostart_enabled: $("desktop_autostart_enabled").checked,
+          };
+          if (DESKTOP_RUNTIME_LAST && !DESKTOP_RUNTIME_LAST.autostart_supported) {
+            delete payload.autostart_enabled;
+          }
+          const data = await api("/api/system/desktop", {
+            method: "PUT",
+            body: JSON.stringify(payload),
+          });
+          paintDesktopRuntime(data);
+          setStatus(t("桌面运行选项已保存。"), "success");
+        } catch (err) {
+          setStatus(err.message, "error");
+        } finally {
+          btn.disabled = false;
+          btn.textContent = oldText;
+        }
+      }
+
+      $("btn_save_desktop_runtime_admin").addEventListener("click", saveDesktopRuntime);
 
       async function shutdownBackend() {
         const lang = I18n.getLang();
@@ -699,6 +800,7 @@
         }
       });
 
+      loadBuildVersion();
       bootstrap();
     </script>
   </body>

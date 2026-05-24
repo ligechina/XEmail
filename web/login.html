@@ -217,6 +217,40 @@
         if (level) statusEl.classList.add(level);
       }
 
+      function getFirstVisibleInput() {
+        const fields = Array.from(document.querySelectorAll("input:not([disabled])"));
+        return (
+          fields.find((el) => {
+            const s = window.getComputedStyle(el);
+            return s.display !== "none" && s.visibility !== "hidden";
+          }) || null
+        );
+      }
+
+      function recoverInputFocus() {
+        const target = getFirstVisibleInput();
+        if (!target) return;
+        try {
+          target.focus();
+          target.click();
+        } catch (_) {}
+      }
+
+      function installInputFocusRecovery() {
+        // In desktop webview first-open, focus can be lost by native dialogs.
+        // Keep trying briefly so username/password fields become immediately editable.
+        const events = ["pointerdown", "mousedown", "click", "focus", "visibilitychange"];
+        events.forEach((evt) => {
+          window.addEventListener(evt, recoverInputFocus, { passive: true });
+        });
+        let ticks = 0;
+        const timer = setInterval(() => {
+          ticks += 1;
+          recoverInputFocus();
+          if (ticks >= 24) clearInterval(timer); // ~12 seconds
+        }, 500);
+      }
+
       function formatApiError(data) {
         const d = data && data.detail;
         if (!d) return "";
@@ -254,10 +288,10 @@
           }
           if (!s.initialized) {
             $("mode_setup").style.display = "block";
-            $("setup_username").focus();
+            recoverInputFocus();
           } else {
             $("mode_auth").style.display = "block";
-            $("login_username").focus();
+            recoverInputFocus();
           }
         } catch (err) {
           setStatus(err.message || t("无法连接服务端"), "error");
@@ -318,6 +352,7 @@
         t("注册成功，正在进入…")
       );
 
+      installInputFocusRecovery();
       bootstrap();
     </script>
   </body>

@@ -22,7 +22,12 @@ log = logging.getLogger(__name__)
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "data"
+_data_dir_override = os.environ.get("XEMAIL_DATA_DIR", "").strip()
+if _data_dir_override:
+    _candidate = Path(_data_dir_override).expanduser()
+    DATA_DIR = _candidate if _candidate.is_absolute() else (BASE_DIR / _candidate)
+else:
+    DATA_DIR = BASE_DIR / "data"
 CONFIG_FILE = DATA_DIR / "config.json"
 EMAILS_FILE = DATA_DIR / "emails.json"
 DRAFTS_FILE = DATA_DIR / "drafts.json"
@@ -1401,6 +1406,27 @@ def write_system_mode(mode: str) -> str:
     cfg["system"] = system
     write_config(cfg)
     return norm
+
+
+def read_desktop_settings() -> Dict[str, Any]:
+    cfg = read_config()
+    system = dict(cfg.get("system") or {})
+    desktop = dict(system.get("desktop") or {})
+    return {
+        "enable_tray": bool(desktop.get("enable_tray", False)),
+    }
+
+
+def write_desktop_settings(*, enable_tray: Optional[bool] = None) -> Dict[str, Any]:
+    cfg = read_config()
+    system = dict(cfg.get("system") or {})
+    desktop = dict(system.get("desktop") or {})
+    if enable_tray is not None:
+        desktop["enable_tray"] = bool(enable_tray)
+    system["desktop"] = desktop
+    cfg["system"] = system
+    write_config(cfg)
+    return {"enable_tray": bool(desktop.get("enable_tray", False))}
 
 
 # -------- session secret --------

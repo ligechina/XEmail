@@ -13,6 +13,7 @@ import mimetypes
 import os
 import queue
 import signal
+import sys
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -45,6 +46,8 @@ from app.models import (
     Contact,
     ContactCreate,
     ContactUpdate,
+    DesktopSettingsStatus,
+    DesktopSettingsUpdate,
     Experience,
     ExperienceCreate,
     ExperienceUpdate,
@@ -156,6 +159,7 @@ from app.storage import (
     list_users,
     move_attachments_folder,
     read_drafts,
+    read_desktop_settings,
     read_emails,
     import_folders_for_account,
     import_prompts_for_account,
@@ -175,6 +179,7 @@ from app.storage import (
     update_prompt,
     update_user,
     write_drafts,
+    write_desktop_settings,
     write_emails,
     write_field_config_for_account,
     write_folders,
@@ -368,6 +373,9 @@ def logo_svg() -> FileResponse:
 
 
 WEB_I18N = WEB_DIR / "i18n.js"
+WEB_RUNTIME_STATUS_JS = WEB_DIR / "runtime_status.js"
+WEB_RUNTIME_STATUS_CSS = WEB_DIR / "runtime_status.css"
+BUILD_VERSION_FILE = Path(__file__).resolve().parent.parent / "VERSION"
 
 
 @app.get("/i18n.js")
@@ -375,6 +383,20 @@ def i18n_js() -> FileResponse:
     if not WEB_I18N.exists():
         raise HTTPException(status_code=404, detail="i18n bundle not found")
     return FileResponse(WEB_I18N, media_type="application/javascript")
+
+
+@app.get("/runtime_status.js")
+def runtime_status_js() -> FileResponse:
+    if not WEB_RUNTIME_STATUS_JS.exists():
+        raise HTTPException(status_code=404, detail="runtime status js not found")
+    return FileResponse(WEB_RUNTIME_STATUS_JS, media_type="application/javascript")
+
+
+@app.get("/runtime_status.css")
+def runtime_status_css() -> FileResponse:
+    if not WEB_RUNTIME_STATUS_CSS.exists():
+        raise HTTPException(status_code=404, detail="runtime status css not found")
+    return FileResponse(WEB_RUNTIME_STATUS_CSS, media_type="text/css")
 
 
 # -------- auth endpoints --------
@@ -598,6 +620,72 @@ def set_system_mode(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return SystemModeStatus(mode=mode)
+
+
+def _read_build_version() -> str:
+    try:
+        text = BUILD_VERSION_FILE.read_text(encoding="utf-8").strip()
+    except Exception:
+        return "dev"
+    return text or "dev"
+
+
+@app.get("/api/system/build")
+def get_build_info(_: User = Depends(current_user)) -> Dict[str, str]:
+    return {"version": _read_build_version()}
+
+
+def _desktop_autostart_status() -> tuple[bool, bool]:
+    if sys.platform != "darwin":
+        return (False, False)
+    try:
+        from desktop.autostart import autostart_status
+    except Exception:
+        return (True, False)
+
+    status = autostart_status()
+    return (True, status == "enabled")
+
+
+@app.get("/api/system/desktop", response_model=DesktopSettingsStatus)
+def get_desktop_settings(_: User = Depends(require_admin)) -> DesktopSettingsStatus:
+    stored = read_desktop_settings()
+    supported, enabled = _desktop_autostart_status()
+    return DesktopSettingsStatus(
+        enable_tray=bool(stored.get("enable_tray", False)),
+        autostart_supported=supported,
+        autostart_enabled=enabled,
+    )
+
+
+@app.put("/api/system/desktop", response_model=DesktopSettingsStatus)
+def update_desktop_settings(
+    payload: DesktopSettingsUpdate, _: User = Depends(require_admin)
+) -> DesktopSettingsStatus:
+    # Persist tray preference for the desktop launcher (effective next start).
+    stored = write_desktop_settings(enable_tray=payload.enable_tray)
+
+    supported, enabled = _desktop_autostart_status()
+    if payload.autostart_enabled is not None:
+        if not supported:
+            raise HTTPException(status_code=400, detail="当前系统不支持开机启动开关。")
+        try:
+            from desktop.autostart import disable_autostart, enable_autostart
+            from desktop.app import pick_python_executable
+
+            if payload.autostart_enabled:
+                enable_autostart(python_executable=pick_python_executable())
+            else:
+                disable_autostart()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"开机启动设置失败: {exc}")
+        supported, enabled = _desktop_autostart_status()
+
+    return DesktopSettingsStatus(
+        enable_tray=bool(stored.get("enable_tray", False)),
+        autostart_supported=supported,
+        autostart_enabled=enabled,
+    )
 
 
 @app.post("/api/system/shutdown")

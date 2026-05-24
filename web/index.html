@@ -75,6 +75,14 @@
         font-weight: 600;
         font-size: 16px;
       }
+      .build-version {
+        font-size: 11px;
+        color: var(--text-muted);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 1px 7px;
+        font-weight: 500;
+      }
       .account-switcher {
         font: inherit;
         padding: 6px 28px 6px 12px;
@@ -85,6 +93,9 @@
         cursor: pointer;
         font-size: 13px;
         max-width: 240px;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+        overflow: hidden;
         appearance: none;
         -webkit-appearance: none;
         background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' stroke='%236b7280' fill='none' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
@@ -146,6 +157,18 @@
         display: flex;
         align-items: center;
         gap: 8px;
+      }
+      .toolbar .btn {
+        flex: 0 0 auto;
+        white-space: nowrap;
+      }
+      #btn_receive,
+      #btn_refresh,
+      #btn_toggle_prompts,
+      #btn_logout,
+      #btn_admin {
+        min-width: 88px;
+        justify-content: center;
       }
       .btn {
         font: inherit;
@@ -2458,6 +2481,7 @@
         <div class="brand">
           <img class="logo" src="/logo.svg" alt="XEmail" />
           <span>XEmail</span>
+          <span class="build-version" id="build_version_tag">v...</span>
         </div>
         <div class="toolbar">
           <select
@@ -2539,26 +2563,20 @@
           <a
             class="btn btn-ghost"
             href="/contacts"
-            target="_blank"
-            rel="noopener"
-            title="通讯录（新标签页打开）"
+            title="通讯录"
             >📇 通讯录</a
           >
           <a
             class="btn btn-ghost"
             href="/settings"
-            target="_blank"
-            rel="noopener"
-            title="设置（新标签页打开）"
+            title="设置"
             >⚙ 设置</a
           >
           <a
             class="btn btn-ghost"
             href="/admin"
-            target="_blank"
-            rel="noopener"
             id="btn_admin"
-            title="用户管理（新标签页打开）"
+            title="用户管理"
             style="display: none"
             >👥 用户</a
           >
@@ -2945,7 +2963,7 @@
               readonly
             />
             <div style="font-size:11.5px;color:var(--text-subtle)">
-              邮箱地址不可在此修改。如需修改请前往 <a href="/contacts" target="_blank" style="color:var(--primary);text-decoration:none">/contacts</a>。
+              邮箱地址不可在此修改。如需修改请前往 <a href="/contacts" style="color:var(--primary);text-decoration:none">/contacts</a>。
             </div>
           </div>
           <div class="field" style="display:flex;flex-direction:column;gap:4px;margin-bottom:10px">
@@ -3043,7 +3061,6 @@
           <div style="margin-top:8px">
             <a
               href="/contacts"
-              target="_blank"
               style="font-size:12px;color:var(--primary);text-decoration:none"
               >📇 打开通讯录管理 →</a
             >
@@ -3665,6 +3682,17 @@
         if (adminBtn) adminBtn.style.display = isAdmin() ? "" : "none";
         applyDebugVisibility();
         return true;
+      }
+
+      async function loadBuildVersion() {
+        try {
+          const data = await api("/api/system/build");
+          const tag = document.getElementById("build_version_tag");
+          if (tag) tag.textContent = `v${data.version || "dev"}`;
+        } catch (_) {
+          const tag = document.getElementById("build_version_tag");
+          if (tag) tag.textContent = "vdev";
+        }
       }
 
       async function logout() {
@@ -10102,6 +10130,7 @@
       (async () => {
         const ok = await bootstrapAuth();
         if (!ok) return;
+        loadBuildVersion();
         updateMergeToggleButton();
         renderFolders();
         setupDrag();

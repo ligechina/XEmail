@@ -384,10 +384,13 @@
     <script>
       const $ = (id) => document.getElementById(id);
 
-      // "✕ 关闭": close this tab. Works when opened from the inbox
-      // topbar (target=_blank); silently no-ops on direct URL access.
+      // In desktop webview, window.close() may be blocked. Try close first,
+      // then fall back to inbox navigation so the button still works.
       function closeTab() {
         try { window.close(); } catch (_) {}
+        setTimeout(() => {
+          if (!window.closed) window.location.href = "/";
+        }, 80);
       }
 
       let CONTACTS = [];

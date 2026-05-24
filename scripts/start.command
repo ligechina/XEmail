@@ -24,6 +24,8 @@ PORT="${XEMAIL_PORT:-8000}"
 HOST="${XEMAIL_HOST:-127.0.0.1}"
 PID_FILE="$PROJECT_DIR/data/server.pid"
 LOG_FILE="$PROJECT_DIR/data/server.log"
+APP_ROOT="${XEMAIL_APP_DIR:-$HOME/Library/Application Support/XEmail}"
+USER_VENV="$APP_ROOT/runtime/.venv"
 
 mkdir -p "$PROJECT_DIR/data"
 
@@ -54,14 +56,18 @@ if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   exit 1
 fi
 
-# Pick python: prefer project venv, else system python3.
-if [ -x "$PROJECT_DIR/.venv/bin/python" ]; then
+# Pick python: prefer writable project venv, else per-user venv.
+if [ -x "$PROJECT_DIR/.venv/bin/python" ] && [ -w "$PROJECT_DIR/.venv" ]; then
   PY="$PROJECT_DIR/.venv/bin/python"
-  echo "[环境] 使用虚拟环境: $PY"
+  echo "[环境] 使用项目虚拟环境: $PY"
 elif command -v python3 >/dev/null 2>&1; then
-  PY="$(command -v python3)"
-  echo "[环境] 未发现 .venv，使用系统 Python: $PY"
-  echo "       建议执行 README 中的 venv + pip install 步骤以获得隔离环境。"
+  if [ ! -x "$USER_VENV/bin/python" ]; then
+    echo "[环境] 创建用户虚拟环境: $USER_VENV"
+    mkdir -p "$APP_ROOT/runtime"
+    python3 -m venv "$USER_VENV" || { echo "[启动失败] 无法创建虚拟环境"; exit 1; }
+  fi
+  PY="$USER_VENV/bin/python"
+  echo "[环境] 使用用户虚拟环境: $PY"
 else
   echo "[启动失败] 找不到 python3，请先安装 Python 3。"
   exit 1
@@ -69,9 +75,12 @@ fi
 
 # Sanity check: uvicorn importable?
 if ! "$PY" -c "import uvicorn, fastapi" >/dev/null 2>&1; then
-  echo "[依赖缺失] 当前 Python 未安装 uvicorn / fastapi。"
-  echo "请先执行： \"$PY\" -m pip install -r requirements.txt"
-  exit 1
+  echo "[依赖缺失] 正在安装 uvicorn / fastapi ..."
+  "$PY" -m pip install -r "$PROJECT_DIR/requirements.txt" || {
+    echo "[启动失败] 自动安装依赖失败，请手动执行："
+    echo "           \"$PY\" -m pip install -r \"$PROJECT_DIR/requirements.txt\""
+    exit 1
+  }
 fi
 
 # Truncate previous log so we don't accumulate forever.
