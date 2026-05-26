@@ -1703,20 +1703,25 @@
         background: rgba(37, 99, 235, 0.12);
         font-weight: 600;
       }
-      /* Move-to dropdown */
+      /* Move-to dropdown — uses position:fixed so it escapes the
+         overflow:hidden ancestors (.detail and .thread-mail). JS computes
+         top/left from the trigger button's bounding rect. */
       .move-menu {
         position: relative;
       }
       .move-menu-list {
-        position: absolute;
-        top: calc(100% + 4px);
-        right: 0;
+        position: fixed;
+        top: 0;
+        left: 0;
         background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 6px;
         box-shadow: var(--shadow-md);
-        min-width: 140px;
-        z-index: 50;
+        min-width: 200px;
+        max-width: 380px;
+        max-height: calc(100vh - 80px);
+        overflow-y: auto;
+        z-index: 2000;
         display: none;
         padding: 4px 0;
       }
@@ -2120,14 +2125,60 @@
         padding: 10px 24px 14px;
         border-top: 1px solid var(--border);
         display: flex;
-        flex-wrap: wrap;
+        flex-direction: column;
         gap: 6px;
+      }
+      .attach-toolbar {
+        display: flex;
         align-items: center;
+        flex-wrap: wrap;
+        gap: 10px;
       }
       .attachments .label {
         font-size: 12px;
         color: var(--text-muted);
-        margin-right: 4px;
+      }
+      .attach-toolbar-check {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 12px;
+        color: var(--text-subtle);
+        cursor: pointer;
+        user-select: none;
+      }
+      .attach-toolbar-check input {
+        margin: 0;
+      }
+      .attach-batch-btn {
+        font: inherit;
+        font-size: 12px;
+        padding: 3px 10px;
+        border-radius: 6px;
+        background: var(--primary, #2563eb);
+        color: #fff;
+        border: 0;
+        cursor: pointer;
+      }
+      .attach-batch-btn:disabled {
+        background: var(--surface-muted, #e5e7eb);
+        color: var(--text-muted, #9ca3af);
+        cursor: not-allowed;
+      }
+      .attach-chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        align-items: center;
+      }
+      .attach-row {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .attach-pick {
+        margin: 0;
+        cursor: pointer;
       }
       .attach-chip {
         display: inline-flex;
@@ -2144,6 +2195,104 @@
       }
       .attach-chip:hover {
         border-color: var(--border-strong);
+      }
+      /* Download completion popup */
+      .download-toast-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.35);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 3000;
+      }
+      .download-toast {
+        background: var(--surface, #fff);
+        color: var(--text, #111827);
+        padding: 18px 20px 14px;
+        border-radius: 10px;
+        min-width: 300px;
+        max-width: 560px;
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+      }
+      .download-toast .title {
+        font-weight: 600;
+        font-size: 14px;
+        margin-bottom: 8px;
+      }
+      .download-toast .body {
+        color: var(--text-subtle, #4b5563);
+        font-size: 13px;
+        margin-bottom: 12px;
+        word-break: break-all;
+      }
+      .download-toast .err-list {
+        max-height: 120px;
+        overflow-y: auto;
+        margin: 0 0 12px;
+        padding: 8px 10px;
+        background: #fef2f2;
+        border: 1px solid #fecaca;
+        border-radius: 6px;
+        color: #b91c1c;
+        font-size: 12px;
+      }
+      .download-toast .err-list li {
+        margin: 0 0 2px;
+        list-style: none;
+      }
+      .download-toast .actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+      .download-toast button {
+        font: inherit;
+        padding: 5px 14px;
+        border-radius: 6px;
+        border: 0;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      .download-toast button.primary {
+        background: var(--primary, #2563eb);
+        color: #fff;
+      }
+      .download-toast button.secondary {
+        background: var(--surface-muted, #f3f4f6);
+        color: var(--text, #111827);
+      }
+      /* Right-click context menu for attachment chips — same chrome as
+         the mail-list context menu, just a smaller surface. */
+      .attach-context-menu {
+        position: fixed;
+        z-index: 2000;
+        display: none;
+        flex-direction: column;
+        background: var(--surface, #fff);
+        border: 1px solid var(--border, #e5e7eb);
+        border-radius: 8px;
+        box-shadow: 0 8px 28px rgba(0, 0, 0, 0.16);
+        padding: 4px;
+        min-width: 160px;
+      }
+      .attach-context-menu.open {
+        display: flex;
+      }
+      .attach-context-menu button {
+        width: 100%;
+        border: 0;
+        background: transparent;
+        text-align: left;
+        padding: 7px 10px;
+        border-radius: 6px;
+        color: var(--text, #111827);
+        cursor: pointer;
+        font: inherit;
+        white-space: nowrap;
+      }
+      .attach-context-menu button:hover {
+        background: var(--surface-muted, #f3f4f6);
       }
       .attach-chip .name {
         white-space: nowrap;
@@ -2781,6 +2930,11 @@
       <div class="mcm-main" id="mail_context_main"></div>
       <div class="mcm-submenu" id="mail_context_submenu" style="display:none"></div>
     </div>
+
+    <!-- Right-click menu for attachment chips. Rebuilt per open with
+         "Open" and "Save" actions; targets are encoded on the chip via
+         data-record-id / data-filename. -->
+    <div class="attach-context-menu" id="attach_context_menu"></div>
 
     <!-- API-key missing reminder; shown on boot if /api/llm-config reports unconfigured -->
     <div
@@ -5409,24 +5563,458 @@
         return previewExts.some((ext) => name.endsWith(ext));
       }
 
+      // -------- attachment open / download --------
+      // Two actions: "用系统默认应用打开" (POST to backend; backend opens
+      // the file locally) and "下载" (fetch as blob and trigger an in-page
+      // anchor download). Neither relies on target=_blank navigation, which
+      // is what previously routed the URL through the system browser in
+      // pywebview and lost the session cookie ("未登录或会话已过期").
+      //
+      // The chosen action is remembered per file-extension in localStorage
+      // so repeat opens of the same type don't re-prompt.
+
+      const ATTACHMENT_PREF_KEY = "xemail_attachment_open_pref";
+
+      function attachmentExt(filename) {
+        const s = String(filename || "");
+        const slash = Math.max(s.lastIndexOf("/"), s.lastIndexOf("\\"));
+        const tail = slash >= 0 ? s.slice(slash + 1) : s;
+        const dot = tail.lastIndexOf(".");
+        if (dot <= 0) return "";
+        return tail.slice(dot).toLowerCase();
+      }
+
+      function readAttachmentPrefs() {
+        try {
+          const raw = localStorage.getItem(ATTACHMENT_PREF_KEY);
+          if (!raw) return {};
+          const obj = JSON.parse(raw);
+          return obj && typeof obj === "object" ? obj : {};
+        } catch {
+          return {};
+        }
+      }
+
+      function getAttachmentPref(ext) {
+        if (!ext) return null;
+        const prefs = readAttachmentPrefs();
+        const v = prefs[ext];
+        return v === "open" || v === "download" ? v : null;
+      }
+
+      function setAttachmentPref(ext, choice) {
+        if (!ext) return;
+        const prefs = readAttachmentPrefs();
+        prefs[ext] = choice;
+        try {
+          localStorage.setItem(ATTACHMENT_PREF_KEY, JSON.stringify(prefs));
+        } catch {}
+      }
+
+      function clearAttachmentPref(ext) {
+        if (!ext) return;
+        const prefs = readAttachmentPrefs();
+        if (ext in prefs) {
+          delete prefs[ext];
+          try {
+            localStorage.setItem(ATTACHMENT_PREF_KEY, JSON.stringify(prefs));
+          } catch {}
+        }
+      }
+
+      async function openAttachmentWithSystemApp(recordId, filename) {
+        const url = `/api/attachments/${encodeURIComponent(recordId)}/${encodeURIComponent(filename)}/open`;
+        let resp;
+        try {
+          resp = await fetch(url, { method: "POST", credentials: "same-origin" });
+        } catch (err) {
+          alert(`打开附件失败：${err && err.message ? err.message : err}`);
+          return;
+        }
+        if (resp.ok) return;
+        let detail = `HTTP ${resp.status}`;
+        try {
+          const data = await resp.json();
+          if (data && data.detail) detail = data.detail;
+        } catch {}
+        alert(`打开附件失败：${detail}`);
+      }
+
+      // pywebview's WKWebView silently swallows in-page `<a download>`
+      // clicks (no download delegate). So in the desktop app we go through
+      // the backend: pick a folder via the pywebview js_api, then POST the
+      // list of attachments to /save-batch and let the server copy bytes
+      // into the chosen folder. A real browser falls back to per-file blob
+      // downloads.
+      const PYWEBVIEW_API_TIMEOUT_MS = 5 * 60 * 1000;
+
+      function isPywebviewAvailable() {
+        return !!(
+          window.pywebview &&
+          window.pywebview.api &&
+          typeof window.pywebview.api.choose_save_folder === "function"
+        );
+      }
+
+      async function waitForPywebviewApi(timeoutMs = 800) {
+        // pywebview injects window.pywebview.api asynchronously after the
+        // page loads. Give it a brief moment before declaring "not desktop".
+        if (isPywebviewAvailable()) return true;
+        const start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+          await new Promise((r) => setTimeout(r, 50));
+          if (isPywebviewAvailable()) return true;
+        }
+        return false;
+      }
+
+      async function pickSaveFolderViaPywebview() {
+        if (!isPywebviewAvailable()) return null;
+        try {
+          const result = await Promise.race([
+            window.pywebview.api.choose_save_folder(),
+            new Promise((_, rej) =>
+              setTimeout(() => rej(new Error("timeout")), PYWEBVIEW_API_TIMEOUT_MS)
+            ),
+          ]);
+          if (!result) return null;
+          return String(result);
+        } catch {
+          return null;
+        }
+      }
+
+      async function pickSaveFolder() {
+        // Wait briefly for the pywebview API to attach itself, then prefer
+        // the native dialog. In a regular browser there's no portable
+        // "pick a directory" affordance, so we fall back to a text prompt
+        // for the absolute path (typical self-hosted operator workflow).
+        if (await waitForPywebviewApi()) {
+          return await pickSaveFolderViaPywebview();
+        }
+        const typed = window.prompt(
+          "请输入下载文件夹的绝对路径：",
+          ""
+        );
+        return typed && typed.trim() ? typed.trim() : null;
+      }
+
+      function closeDownloadToast() {
+        const overlay = document.querySelector(".download-toast-overlay");
+        if (overlay) overlay.remove();
+      }
+
+      function showDownloadToast({ title, body, errors, folder }) {
+        closeDownloadToast();
+        const overlay = document.createElement("div");
+        overlay.className = "download-toast-overlay";
+        const errsHtml =
+          errors && errors.length
+            ? `<ul class="err-list">${errors
+                .map(
+                  (e) =>
+                    `<li>${escapeHtml(e.filename || "")}：${escapeHtml(e.error || "")}</li>`
+                )
+                .join("")}</ul>`
+            : "";
+        overlay.innerHTML = `
+          <div class="download-toast" role="alertdialog" aria-modal="true">
+            <div class="title">${escapeHtml(title || "")}</div>
+            <div class="body">${escapeHtml(body || "")}</div>
+            ${errsHtml}
+            <div class="actions">
+              ${
+                folder
+                  ? `<button type="button" class="secondary" data-action="reveal">打开文件夹</button>`
+                  : ""
+              }
+              <button type="button" class="primary" data-action="close">确定</button>
+            </div>
+          </div>
+        `;
+        overlay.addEventListener("click", (e) => {
+          if (e.target === overlay) closeDownloadToast();
+        });
+        overlay.querySelector('[data-action="close"]').onclick = closeDownloadToast;
+        const revealBtn = overlay.querySelector('[data-action="reveal"]');
+        if (revealBtn) {
+          revealBtn.onclick = () => revealFolder(folder);
+        }
+        document.body.appendChild(overlay);
+        document.addEventListener("keydown", function onEsc(ev) {
+          if (ev.key === "Escape") {
+            closeDownloadToast();
+            document.removeEventListener("keydown", onEsc);
+          }
+        });
+      }
+
+      async function revealFolder(folder) {
+        if (!folder) return;
+        try {
+          await fetch("/api/system/reveal-path", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: folder }),
+          });
+        } catch {}
+      }
+
+      async function saveAttachmentsBatch(items) {
+        if (!items || items.length === 0) return;
+        const folder = await pickSaveFolder();
+        if (!folder) return; // user cancelled
+        let resp;
+        try {
+          resp = await fetch("/api/attachments/save-batch", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ folder, items }),
+          });
+        } catch (err) {
+          showDownloadToast({
+            title: "下载失败",
+            body: `网络错误：${(err && err.message) || err}`,
+          });
+          return;
+        }
+        if (!resp.ok) {
+          let detail = `HTTP ${resp.status}`;
+          try {
+            const data = await resp.json();
+            if (data && data.detail) detail = data.detail;
+          } catch {}
+          // 403 = remote client, server can't write to a local folder.
+          // Fall back to per-file in-page blob downloads.
+          if (resp.status === 403) {
+            await fallbackBrowserDownloads(items);
+            return;
+          }
+          showDownloadToast({ title: "下载失败", body: detail });
+          return;
+        }
+        const data = await resp.json();
+        const n = data.count || (data.saved && data.saved.length) || 0;
+        const e = (data.errors && data.errors.length) || 0;
+        showDownloadToast({
+          title: e === 0 ? "下载完成" : `下载完成（${e} 个失败）`,
+          body: `已保存 ${n} 个附件到 ${data.folder}`,
+          errors: data.errors || [],
+          folder: data.folder || folder,
+        });
+      }
+
+      async function fallbackBrowserDownloads(items) {
+        // Browser fallback when the backend won't write to disk (remote
+        // client). Issue per-file blob downloads using the browser's
+        // native save mechanism.
+        let saved = 0;
+        const errors = [];
+        for (const it of items) {
+          const url = attachmentUrl(it.record_id, it.filename, true);
+          try {
+            const resp = await fetch(url, { credentials: "same-origin" });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const blob = await resp.blob();
+            const blobUrl = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = blobUrl;
+            a.download = it.filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(blobUrl), 2000);
+            saved++;
+          } catch (err) {
+            errors.push({ filename: it.filename, error: String(err.message || err) });
+          }
+        }
+        showDownloadToast({
+          title: errors.length === 0 ? "下载完成" : `下载完成（${errors.length} 个失败）`,
+          body: `浏览器已发起 ${saved} 个文件的下载。`,
+          errors,
+        });
+      }
+
+      async function downloadAttachmentToDisk(recordId, filename) {
+        // Single-file download: just delegates to the batch flow so the
+        // user gets the same folder picker + completion popup.
+        await saveAttachmentsBatch([{ record_id: recordId, filename }]);
+      }
+
+      function performAttachmentAction(action, recordId, filename) {
+        if (action === "open") {
+          openAttachmentWithSystemApp(recordId, filename);
+        } else if (action === "download") {
+          downloadAttachmentToDisk(recordId, filename);
+        }
+      }
+
+      // Inline picker shown when the user clicks an attachment whose file
+      // type has no remembered choice yet. Two actions + "记住此类型" so
+      // future clicks of the same extension skip straight to the action.
+      function openAttachmentChoicePopover(x, y, recordId, filename) {
+        const menu = $("attach_context_menu");
+        if (!menu) return;
+        menu.innerHTML = "";
+
+        const ext = attachmentExt(filename);
+        const extLabel = ext || "此类型";
+
+        const title = document.createElement("div");
+        title.style.cssText =
+          "padding: 6px 10px 4px; font-size: 12px; color: var(--text-subtle);" +
+          " white-space: nowrap;";
+        title.textContent = `如何打开 ${extLabel} 文件？`;
+        menu.appendChild(title);
+
+        const rememberRow = document.createElement("label");
+        rememberRow.style.cssText =
+          "display: flex; align-items: center; gap: 6px; padding: 4px 10px;" +
+          " font-size: 12px; color: var(--text); cursor: pointer;" +
+          " white-space: nowrap;";
+        const remember = document.createElement("input");
+        remember.type = "checkbox";
+        remember.checked = true;
+        remember.style.margin = "0";
+        rememberRow.appendChild(remember);
+        const rememberText = document.createElement("span");
+        rememberText.textContent = ext
+          ? `记住 ${ext} 文件的选择`
+          : "记住此类型的选择";
+        rememberRow.appendChild(rememberText);
+
+        const openBtn = document.createElement("button");
+        openBtn.type = "button";
+        openBtn.textContent = "📂 用系统默认应用打开";
+        openBtn.onclick = () => {
+          closeAttachContextMenu();
+          if (remember.checked) setAttachmentPref(ext, "open");
+          performAttachmentAction("open", recordId, filename);
+        };
+
+        const dlBtn = document.createElement("button");
+        dlBtn.type = "button";
+        dlBtn.textContent = "💾 下载";
+        dlBtn.onclick = () => {
+          closeAttachContextMenu();
+          if (remember.checked) setAttachmentPref(ext, "download");
+          performAttachmentAction("download", recordId, filename);
+        };
+
+        menu.appendChild(openBtn);
+        menu.appendChild(dlBtn);
+        menu.appendChild(rememberRow);
+
+        const margin = 8;
+        menu.classList.add("open");
+        menu.style.left = "0px";
+        menu.style.top = "0px";
+        const rect = menu.getBoundingClientRect();
+        const maxX = window.innerWidth - rect.width - margin;
+        const maxY = window.innerHeight - rect.height - margin;
+        menu.style.left = `${Math.max(margin, Math.min(x, maxX))}px`;
+        menu.style.top = `${Math.max(margin, Math.min(y, maxY))}px`;
+      }
+
+      function handleAttachmentChipClick(event, chip) {
+        event.preventDefault();
+        const recordId = chip.dataset.recordId;
+        const filename = chip.dataset.filename;
+        if (!recordId || !filename) return;
+        const ext = attachmentExt(filename);
+        const pref = getAttachmentPref(ext);
+        if (pref) {
+          performAttachmentAction(pref, recordId, filename);
+        } else {
+          openAttachmentChoicePopover(event.clientX, event.clientY, recordId, filename);
+        }
+      }
+
       function renderAttachmentsSection(recordId, attachments) {
         if (!attachments || attachments.length === 0) return "";
-        const chips = attachments
+        const rows = attachments
           .map((a) => {
             const previewable = canPreviewAttachment(a);
-            const url = attachmentUrl(recordId, a.filename, !previewable);
-            const openAttrs = previewable
-              ? `target="_blank" rel="noopener noreferrer"`
-              : `download="${escapeHtml(a.filename)}"`;
-            const title = previewable ? "新页面打开" : "下载";
-            return `<a class="attach-chip" href="${url}" ${openAttrs} title="${title}">
-              <span class="name">${escapeHtml(a.filename)}</span>
-              <span class="size">${escapeHtml(formatFileSize(a.size))}</span>
-            </a>`;
+            const fallbackUrl = attachmentUrl(recordId, a.filename, !previewable);
+            const chipTitle = "左键 打开/下载 · 右键 更多";
+            return `<span class="attach-row">
+              <input type="checkbox" class="attach-pick" title="勾选以批量下载"
+                data-record-id="${escapeHtml(recordId)}"
+                data-filename="${escapeHtml(a.filename)}" />
+              <a class="attach-chip" href="${fallbackUrl}" title="${escapeHtml(chipTitle)}"
+                data-record-id="${escapeHtml(recordId)}"
+                data-filename="${escapeHtml(a.filename)}"
+                data-previewable="${previewable ? "1" : "0"}">
+                <span class="name">${escapeHtml(a.filename)}</span>
+                <span class="size">${escapeHtml(formatFileSize(a.size))}</span>
+              </a>
+            </span>`;
           })
           .join("");
-        return `<div class="attachments"><span class="label">📎 附件 (${attachments.length})</span>${chips}</div>`;
+        return `<div class="attachments" data-attach-section>
+          <div class="attach-toolbar">
+            <span class="label">📎 附件 (${attachments.length})</span>
+            <label class="attach-toolbar-check">
+              <input type="checkbox" class="attach-select-all" />
+              <span>全选</span>
+            </label>
+            <button type="button" class="attach-batch-btn" disabled>⬇ 下载选中 (0)</button>
+          </div>
+          <div class="attach-chips">${rows}</div>
+        </div>`;
       }
+
+      // ----- per-section selection wiring (event delegation on document) ---
+      function attachSectionItemsSelected(section) {
+        return Array.from(
+          section.querySelectorAll(".attach-pick:checked")
+        ).map((cb) => ({
+          record_id: cb.dataset.recordId,
+          filename: cb.dataset.filename,
+        }));
+      }
+
+      function refreshAttachSectionToolbar(section) {
+        const picks = section.querySelectorAll(".attach-pick");
+        const checked = section.querySelectorAll(".attach-pick:checked");
+        const all = section.querySelector(".attach-select-all");
+        const btn = section.querySelector(".attach-batch-btn");
+        if (all) {
+          all.checked = picks.length > 0 && checked.length === picks.length;
+          all.indeterminate = checked.length > 0 && checked.length < picks.length;
+        }
+        if (btn) {
+          btn.textContent = `⬇ 下载选中 (${checked.length})`;
+          btn.disabled = checked.length === 0;
+        }
+      }
+
+      document.addEventListener("change", (e) => {
+        const section = e.target.closest("[data-attach-section]");
+        if (!section) return;
+        if (e.target.classList.contains("attach-select-all")) {
+          const want = e.target.checked;
+          section
+            .querySelectorAll(".attach-pick")
+            .forEach((cb) => (cb.checked = want));
+          refreshAttachSectionToolbar(section);
+        } else if (e.target.classList.contains("attach-pick")) {
+          refreshAttachSectionToolbar(section);
+        }
+      });
+
+      document.addEventListener("click", (e) => {
+        const btn = e.target.closest(".attach-batch-btn");
+        if (!btn) return;
+        const section = btn.closest("[data-attach-section]");
+        if (!section) return;
+        const items = attachSectionItemsSelected(section);
+        if (items.length === 0) return;
+        saveAttachmentsBatch(items);
+      });
 
       function buildSafeHtmlSrcdoc(rawHtml) {
         const parser = new DOMParser();
@@ -5768,6 +6356,110 @@
       function closeMailContextMenu() {
         const menu = $("mail_context_menu");
         if (menu) menu.classList.remove("open");
+      }
+
+      // -------- attachment right-click menu --------
+      // Lets the user explicitly trigger either action regardless of the
+      // remembered default, and clear that default when they want the
+      // chooser back.
+      function openAttachContextMenu(x, y, recordId, filename, previewable) {
+        const menu = $("attach_context_menu");
+        if (!menu) return;
+        menu.innerHTML = "";
+
+        const ext = attachmentExt(filename);
+        const currentPref = getAttachmentPref(ext);
+
+        const openBtn = document.createElement("button");
+        openBtn.type = "button";
+        openBtn.textContent = "📂 用系统默认应用打开";
+        openBtn.onclick = () => {
+          closeAttachContextMenu();
+          performAttachmentAction("open", recordId, filename);
+        };
+
+        const saveBtn = document.createElement("button");
+        saveBtn.type = "button";
+        saveBtn.textContent = "💾 下载";
+        saveBtn.onclick = () => {
+          closeAttachContextMenu();
+          performAttachmentAction("download", recordId, filename);
+        };
+
+        menu.appendChild(openBtn);
+        menu.appendChild(saveBtn);
+
+        if (currentPref && ext) {
+          const clearBtn = document.createElement("button");
+          clearBtn.type = "button";
+          const label = currentPref === "open" ? "用系统默认应用打开" : "下载";
+          clearBtn.textContent = `↺ 清除 ${ext} 默认动作（当前：${label}）`;
+          clearBtn.onclick = () => {
+            closeAttachContextMenu();
+            clearAttachmentPref(ext);
+          };
+          menu.appendChild(clearBtn);
+        }
+
+        const margin = 8;
+        menu.classList.add("open");
+        menu.style.left = "0px";
+        menu.style.top = "0px";
+        const rect = menu.getBoundingClientRect();
+        const maxX = window.innerWidth - rect.width - margin;
+        const maxY = window.innerHeight - rect.height - margin;
+        menu.style.left = `${Math.max(margin, Math.min(x, maxX))}px`;
+        menu.style.top = `${Math.max(margin, Math.min(y, maxY))}px`;
+      }
+
+      function closeAttachContextMenu() {
+        const menu = $("attach_context_menu");
+        if (menu) menu.classList.remove("open");
+      }
+
+      // -------- 移动到 dropdown helpers --------
+      // The list uses position:fixed so it isn't clipped by .detail /
+      // .thread-mail's overflow:hidden. Coordinates are computed from the
+      // trigger button's rect and clamped to the viewport so a long folder
+      // tree stays scrollable instead of falling off the bottom.
+      function positionMoveMenu(btn, list) {
+        const margin = 8;
+        // Reset so getBoundingClientRect returns the natural size.
+        list.style.top = "0px";
+        list.style.left = "0px";
+        const btnRect = btn.getBoundingClientRect();
+        const menuRect = list.getBoundingClientRect();
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        let left = btnRect.right - menuRect.width;
+        if (left < margin) left = margin;
+        if (left + menuRect.width > vw - margin) {
+          left = Math.max(margin, vw - margin - menuRect.width);
+        }
+        let top = btnRect.bottom + 4;
+        if (top + menuRect.height > vh - margin) {
+          const aboveTop = btnRect.top - 4 - menuRect.height;
+          if (aboveTop >= margin) {
+            top = aboveTop;
+          } else {
+            top = Math.max(margin, vh - margin - menuRect.height);
+          }
+        }
+        list.style.top = `${top}px`;
+        list.style.left = `${left}px`;
+      }
+
+      function toggleMoveMenu(btn, list) {
+        if (!list) return;
+        if (list.classList.contains("open")) {
+          list.classList.remove("open");
+          return;
+        }
+        document
+          .querySelectorAll(".move-menu-list.open")
+          .forEach((m) => m.classList.remove("open"));
+        list.classList.add("open");
+        positionMoveMenu(btn, list);
       }
 
       function buildMailContextSubmenu(sub, payload) {
@@ -6433,12 +7125,26 @@
             : "fulltext",
         };
         renderList();
+        // 全文 搜索时正文(body_html)还可能是懒加载状态。主动把缺失的
+        // body_html 补齐，并在收到正文后增量重绘 — 否则只有"主题/收发人/
+        // 纯文本正文"命中的邮件才会出现，HTML-only 的邮件会漏掉。
+        if (keyword && MAIL_SEARCH.scope === "fulltext") {
+          ensureBodiesForSearch();
+        } else {
+          // 清空 / 切换 scope 都视为退出全文检索，让旧的补齐任务自然失效。
+          SEARCH_BODY_TOKEN++;
+        }
       }
 
       function clearEmailSearch() {
         MAIL_SEARCH = { keyword: "", scope: "fulltext" };
+        SEARCH_BODY_TOKEN++;
         if ($("mail_search_keyword")) $("mail_search_keyword").value = "";
         if ($("mail_search_scope")) $("mail_search_scope").value = "fulltext";
+        if (SEARCH_INPUT_DEBOUNCE) {
+          clearTimeout(SEARCH_INPUT_DEBOUNCE);
+          SEARCH_INPUT_DEBOUNCE = null;
+        }
         updateSearchBoxState();
         renderList();
       }
@@ -6448,6 +7154,67 @@
         const input = $("mail_search_keyword");
         if (!box || !input) return;
         box.classList.toggle("has-value", !!input.value);
+      }
+
+      // Debounced live-search. Triggered on every keystroke so the list
+      // stays in sync with what the user typed — and critically, clears
+      // back to the full list when the input is emptied (the explicit
+      // search-button-only flow used to leak a stale MAIL_SEARCH.keyword
+      // after backspacing, leaving the user stuck on an empty list).
+      let SEARCH_INPUT_DEBOUNCE = null;
+      function onSearchInputChanged() {
+        updateSearchBoxState();
+        if (SEARCH_INPUT_DEBOUNCE) clearTimeout(SEARCH_INPUT_DEBOUNCE);
+        SEARCH_INPUT_DEBOUNCE = setTimeout(() => {
+          SEARCH_INPUT_DEBOUNCE = null;
+          searchEmails();
+        }, 220);
+      }
+
+      // Token that monotonically increases each time a new search-driven
+      // body load begins (or the search is cleared / scope-changed). Any
+      // in-flight callback compares against this and bails if it's stale,
+      // so we never repaint with a keyword the user already moved past.
+      let SEARCH_BODY_TOKEN = 0;
+      function ensureBodiesForSearch() {
+        const myToken = ++SEARCH_BODY_TOKEN;
+        const queue = (allEmails || []).filter(
+          (e) =>
+            !e.deleted &&
+            e.has_html &&
+            (e.body_html === undefined || e.body_html === null),
+        );
+        if (queue.length === 0) return;
+        const concurrency = 6;
+        let pending = 0;
+        let rerenderTimer = null;
+        const scheduleRerender = () => {
+          if (rerenderTimer) return;
+          rerenderTimer = setTimeout(() => {
+            rerenderTimer = null;
+            if (myToken !== SEARCH_BODY_TOKEN) return;
+            if (!MAIL_SEARCH.keyword) return;
+            renderList();
+          }, 180);
+        };
+        const pump = () => {
+          if (myToken !== SEARCH_BODY_TOKEN) return;
+          while (pending < concurrency && queue.length > 0) {
+            const item = queue.shift();
+            if (item.body_html !== undefined && item.body_html !== null) {
+              continue;
+            }
+            pending++;
+            loadEmailBody(item)
+              .catch(() => {})
+              .finally(() => {
+                pending--;
+                scheduleRerender();
+                pump();
+              });
+          }
+        };
+        pump();
       }
 
       function applySearch(list, kind) {
@@ -7055,7 +7822,7 @@
             btn.onclick = (e) => {
               e.stopPropagation();
               const list = document.getElementById(`${cid}_move_list`);
-              if (list) list.classList.toggle("open");
+              toggleMoveMenu(btn, list);
             };
           } else if (act === "reply") {
             btn.onclick = () => replyToEmail(item);
@@ -7247,7 +8014,7 @@
         $("btn_trash").onclick = () => trashEmail(item);
         $("btn_move").onclick = (e) => {
           e.stopPropagation();
-          $("move_menu_list").classList.toggle("open");
+          toggleMoveMenu($("btn_move"), $("move_menu_list"));
         };
         root.querySelectorAll("#move_menu_list button").forEach((b) => {
           b.onclick = (e) => {
@@ -9883,11 +10650,15 @@
         }
         closeFolderContextMenu();
         closeMailContextMenu();
+        closeAttachContextMenu();
+        document
+          .querySelectorAll(".move-menu-list.open")
+          .forEach((m) => m.classList.remove("open"));
       });
 
       // Close the move-to dropdown when clicking outside it.
       document.addEventListener("click", (e) => {
-        if (!e.target.closest(".move-menu")) {
+        if (!e.target.closest(".move-menu") && !e.target.closest(".move-menu-list")) {
           document
             .querySelectorAll(".move-menu-list.open")
             .forEach((m) => m.classList.remove("open"));
@@ -9898,11 +10669,84 @@
         if (!e.target.closest("#mail_context_menu")) {
           closeMailContextMenu();
         }
+        if (!e.target.closest("#attach_context_menu")) {
+          closeAttachContextMenu();
+        }
       });
+
+      // Attachment chips render with a real href so middle-click and "open
+      // in new tab" still work in normal browsers, but for plain left-click
+      // we intercept here to route through the choice popover / remembered
+      // action. This avoids the target=_blank → system-browser handoff that
+      // strips the session cookie inside pywebview (the "未登录或会话已过期"
+      // bug when clicking attachments in the desktop app).
+      //
+      // stopPropagation is required so the click doesn't bubble into the
+      // global "click outside #attach_context_menu → closeAttachContextMenu"
+      // listener and immediately dismiss the popover we just opened.
+      document.addEventListener(
+        "click",
+        (e) => {
+          if (e.defaultPrevented) return;
+          if (e.button !== undefined && e.button !== 0) return;
+          if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+          const chip = e.target.closest(".attach-chip");
+          if (!chip) return;
+          if (!chip.dataset.recordId || !chip.dataset.filename) return;
+          e.preventDefault();
+          e.stopPropagation();
+          handleAttachmentChipClick(e, chip);
+        },
+        true,
+      );
+
+      // The move-to dropdown is position:fixed and anchored to its trigger
+      // button on open. If the user scrolls or resizes, the anchor moves
+      // but the menu doesn't — close it to avoid a stale floating menu.
+      window.addEventListener("resize", () => {
+        document
+          .querySelectorAll(".move-menu-list.open")
+          .forEach((m) => m.classList.remove("open"));
+        closeAttachContextMenu();
+      });
+      window.addEventListener(
+        "scroll",
+        () => {
+          document
+            .querySelectorAll(".move-menu-list.open")
+            .forEach((m) => m.classList.remove("open"));
+          closeAttachContextMenu();
+        },
+        true,
+      );
 
       // Right-clicking somewhere else dismisses any stale mail-list menu so
       // the browser's native context menu (or no menu at all) takes over.
       document.addEventListener("contextmenu", (e) => {
+        // Attachment chip → open our custom menu instead of the browser
+        // default. Read the targets off data-* attributes the chip
+        // renderer set.
+        const chip = e.target.closest(".attach-chip");
+        if (chip) {
+          const recordId = chip.dataset.recordId;
+          const filename = chip.dataset.filename;
+          if (recordId && filename) {
+            e.preventDefault();
+            closeMailContextMenu();
+            const previewable = chip.dataset.previewable === "1";
+            openAttachContextMenu(
+              e.clientX,
+              e.clientY,
+              recordId,
+              filename,
+              previewable,
+            );
+            return;
+          }
+        }
+        if (!e.target.closest("#attach_context_menu")) {
+          closeAttachContextMenu();
+        }
         if (e.target.closest(".mail-item")) return;
         if (e.target.closest("#mail_context_menu")) return;
         closeMailContextMenu();
@@ -10141,13 +10985,30 @@
         const searchInput = $("mail_search_keyword");
         if (searchInput) {
           searchInput.addEventListener("keydown", (e) => {
-            if (e.key === "Enter") searchEmails();
-            else if (e.key === "Escape" && searchInput.value) {
+            if (e.key === "Enter") {
+              // Enter forces an immediate search, skipping the debounce.
+              if (SEARCH_INPUT_DEBOUNCE) {
+                clearTimeout(SEARCH_INPUT_DEBOUNCE);
+                SEARCH_INPUT_DEBOUNCE = null;
+              }
+              searchEmails();
+            } else if (e.key === "Escape") {
               clearEmailSearch();
             }
           });
-          searchInput.addEventListener("input", updateSearchBoxState);
+          searchInput.addEventListener("input", onSearchInputChanged);
           updateSearchBoxState();
+        }
+        // Changing 搜索范围 (全文 / 收发信人 / 标题) should re-run the
+        // search if a keyword is active — otherwise the dropdown looks
+        // like it does nothing until the user re-presses Enter.
+        const searchScope = $("mail_search_scope");
+        if (searchScope) {
+          searchScope.addEventListener("change", () => {
+            if (($("mail_search_keyword")?.value || "").trim()) {
+              searchEmails();
+            }
+          });
         }
         // Boot path:
         //   * If we have a same-user sessionStorage cache (set by a prior

@@ -13,6 +13,7 @@ import mimetypes
 import os
 import queue
 import signal
+import subprocess
 import sys
 import threading
 import uuid
@@ -27,8 +28,10 @@ from fastapi import (
     File,
     HTTPException,
     Query,
+    Request,
     Response,
     UploadFile,
+    status,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -101,6 +104,7 @@ from app.services.auth import (
     hash_password,
     make_session_token,
     optional_user,
+    read_session_token,
     require_admin,
     verify_password,
 )
@@ -264,6 +268,41 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Endpoints that own the session cookie themselves — login/setup/register
+# set a fresh cookie, logout deletes it. The sliding-TTL middleware skips
+# them so its refresh doesn't fight the endpoint's own Set-Cookie.
+_SESSION_COOKIE_OWNER_PATHS = frozenset(
+    {"/api/auth/login", "/api/auth/logout", "/api/auth/setup", "/api/auth/register"}
+)
+
+
+@app.middleware("http")
+async def slide_session_cookie_expiry(request: Request, call_next):
+    """Keep the user signed in for as long as they're actively using the
+    app: on every authenticated request, re-issue the session cookie with
+    a fresh `max_age` so the 30-day window rolls forward. Without this,
+    even with a persistent webview store the cookie eventually hits its
+    original expiry and the user gets bounced to the login screen."""
+    response = await call_next(request)
+    if request.url.path in _SESSION_COOKIE_OWNER_PATHS:
+        return response
+    session = request.cookies.get(SESSION_COOKIE_NAME)
+    if not session:
+        return response
+    uid = read_session_token(session)
+    if not uid:
+        return response
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=make_session_token(uid),
+        max_age=SESSION_TTL_SECONDS,
+        httponly=True,
+        samesite="lax",
+        path="/",
+    )
+    return response
+
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 WEB_INDEX = WEB_DIR / "index.html"
@@ -2590,15 +2629,9 @@ def delete_draft_attachment(
     return {"status": "ok"}
 
 
-@app.get("/api/attachments/{record_id}/{filename}")
-def download_attachment(
-    record_id: str,
-    filename: str,
-    download: bool = Query(default=False),
-    user: User = Depends(current_user),
-) -> FileResponse:
-    # Trace the record_id back to whichever email/draft/sent it belongs to,
-    # then enforce ownership against the current user.
+def _resolve_attachment_path(record_id: str, filename: str, user: User) -> Path:
+    """Common attachment lookup: locate the record (across emails/drafts/sent),
+    enforce ownership, validate the path, and return a usable Path."""
     record = (
         next((e for e in read_emails() if e.get("id") == record_id), None)
         or next((d for d in read_drafts() if d.get("id") == record_id), None)
@@ -2613,6 +2646,17 @@ def download_attachment(
         raise HTTPException(status_code=400, detail="非法的附件路径。")
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="附件不存在。")
+    return path
+
+
+@app.get("/api/attachments/{record_id}/{filename}")
+def download_attachment(
+    record_id: str,
+    filename: str,
+    download: bool = Query(default=False),
+    user: User = Depends(current_user),
+) -> FileResponse:
+    path = _resolve_attachment_path(record_id, filename, user)
     guessed_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
     # Defense in depth: even with the path skip in ConditionalGZipMiddleware,
     # set Content-Encoding: identity so any future / external proxy doesn't
@@ -2628,6 +2672,146 @@ def download_attachment(
             headers=headers,
         )
     return FileResponse(path, media_type=guessed_type, headers=headers)
+
+
+def _is_local_client(request: Request) -> bool:
+    # "Open with system default app" runs on the backend host. If the client
+    # is remote, the file would open on the server rather than the user's
+    # machine — never what they want. Restrict to loopback.
+    host = (request.client.host if request.client else "") or ""
+    return host in ("127.0.0.1", "::1", "localhost")
+
+
+def _spawn_system_open(path: Path) -> None:
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", str(path)])
+    elif sys.platform.startswith("win"):
+        # os.startfile only exists on Windows; type checker on macOS complains.
+        os.startfile(str(path))  # type: ignore[attr-defined]
+    else:
+        subprocess.Popen(["xdg-open", str(path)])
+
+
+@app.post("/api/attachments/{record_id}/{filename}/open")
+def open_attachment_with_system_app(
+    record_id: str,
+    filename: str,
+    request: Request,
+    user: User = Depends(current_user),
+) -> Dict[str, str]:
+    """Open an attachment with the OS default application on the machine
+    running the backend. This is the desktop-app path that avoids the
+    target=_blank/system-browser cookie loss problem entirely."""
+    if not _is_local_client(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="仅本机客户端可使用系统默认应用打开附件。",
+        )
+    path = _resolve_attachment_path(record_id, filename, user)
+    try:
+        _spawn_system_open(path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=500, detail=f"未找到系统打开命令：{exc}")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"打开附件失败：{exc}")
+    return {"status": "ok"}
+
+
+def _unique_destination_path(target_dir: Path, filename: str) -> Path:
+    # Avoid clobbering an existing file: "report.pdf" → "report (1).pdf".
+    candidate = target_dir / filename
+    if not candidate.exists():
+        return candidate
+    stem = candidate.stem
+    suffix = candidate.suffix
+    for i in range(1, 1000):
+        candidate = target_dir / f"{stem} ({i}){suffix}"
+        if not candidate.exists():
+            return candidate
+    return target_dir / f"{stem}-{uuid.uuid4().hex[:8]}{suffix}"
+
+
+class AttachmentSaveItem(BaseModel):
+    record_id: str
+    filename: str
+
+
+class AttachmentSaveBatchRequest(BaseModel):
+    folder: str
+    items: List[AttachmentSaveItem]
+
+
+class RevealPathRequest(BaseModel):
+    path: str
+
+
+@app.post("/api/system/reveal-path")
+def reveal_path(
+    payload: RevealPathRequest,
+    request: Request,
+    user: User = Depends(current_user),
+) -> Dict[str, str]:
+    """Open a folder in the system file browser (Finder / Explorer /
+    Nautilus). Powers the "打开文件夹" button on the download-complete
+    popup so the user can see what just landed on disk."""
+    if not _is_local_client(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="仅本机客户端可使用此操作。",
+        )
+    target = Path(payload.path).expanduser()
+    if not target.exists() or not target.is_dir():
+        raise HTTPException(status_code=400, detail=f"目录不存在：{target}")
+    try:
+        _spawn_system_open(target)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=500, detail=f"未找到系统打开命令：{exc}")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"打开目录失败：{exc}")
+    return {"status": "ok"}
+
+
+@app.post("/api/attachments/save-batch")
+def save_attachments_batch(
+    payload: AttachmentSaveBatchRequest,
+    request: Request,
+    user: User = Depends(current_user),
+) -> Dict[str, Any]:
+    """Copy one or more attachments into a folder the user picked. Used by
+    both the single-attachment download path (one item in the list) and
+    the multi-select bulk download. Needed because pywebview's WKWebView
+    silently ignores in-page `<a download>` clicks, so the frontend can't
+    rely on the browser-native download mechanism inside the desktop app."""
+    if not _is_local_client(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="仅本机客户端可使用此下载方式。",
+        )
+    if not payload.items:
+        raise HTTPException(status_code=400, detail="未指定要下载的附件。")
+    target_dir = Path(payload.folder).expanduser()
+    if not target_dir.exists() or not target_dir.is_dir():
+        raise HTTPException(
+            status_code=400, detail=f"目录不存在：{target_dir}"
+        )
+    saved: List[str] = []
+    errors: List[Dict[str, str]] = []
+    for item in payload.items:
+        try:
+            src = _resolve_attachment_path(item.record_id, item.filename, user)
+            dst = _unique_destination_path(target_dir, item.filename)
+            dst.write_bytes(src.read_bytes())
+            saved.append(str(dst))
+        except HTTPException as exc:
+            errors.append({"filename": item.filename, "error": str(exc.detail)})
+        except Exception as exc:  # noqa: BLE001
+            errors.append({"filename": item.filename, "error": str(exc)})
+    return {
+        "folder": str(target_dir),
+        "saved": saved,
+        "errors": errors,
+        "count": len(saved),
+    }
 
 
 @app.get("/api/sent", response_model=List[SentRecord])

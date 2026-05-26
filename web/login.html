@@ -232,22 +232,41 @@
         if (!target) return;
         try {
           target.focus();
-          target.click();
         } catch (_) {}
       }
 
+      // Desktop webview first-open: native dialogs can swallow the initial
+      // focus, leaving the username field un-editable until the user clicks.
+      // Retry a few times to hand focus to the first visible input — but
+      // STOP as soon as the user interacts with the page. The previous
+      // implementation re-stole focus on every pointerdown/click, which
+      // prevented the user from clicking into the password field at all
+      // (and incidentally tripped macOS's password-autofill popup).
       function installInputFocusRecovery() {
-        // In desktop webview first-open, focus can be lost by native dialogs.
-        // Keep trying briefly so username/password fields become immediately editable.
-        const events = ["pointerdown", "mousedown", "click", "focus", "visibilitychange"];
-        events.forEach((evt) => {
-          window.addEventListener(evt, recoverInputFocus, { passive: true });
-        });
+        let stopped = false;
+        const stop = () => {
+          if (stopped) return;
+          stopped = true;
+          clearInterval(timer);
+          window.removeEventListener("pointerdown", stop, true);
+          window.removeEventListener("keydown", stop, true);
+        };
+        // Any user interaction = they've taken over; don't fight them.
+        window.addEventListener("pointerdown", stop, true);
+        window.addEventListener("keydown", stop, true);
+
         let ticks = 0;
         const timer = setInterval(() => {
           ticks += 1;
-          recoverInputFocus();
-          if (ticks >= 24) clearInterval(timer); // ~12 seconds
+          if (stopped) return;
+          // Only seed focus while no input is yet focused — never override
+          // a field the user (or autofill) has already picked.
+          const active = document.activeElement;
+          const isInputFocused =
+            active &&
+            (active.tagName === "INPUT" || active.tagName === "TEXTAREA");
+          if (!isInputFocused) recoverInputFocus();
+          if (ticks >= 6) stop(); // ~3 seconds is plenty for first paint
         }, 500);
       }
 

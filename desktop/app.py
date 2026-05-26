@@ -1068,6 +1068,45 @@ def _start_backend(base_url: str, *, env: dict[str, str]) -> BackendHandle:
     raise RuntimeError(f"后端启动超时。请查看日志：{LOG_FILE}")
 
 
+class JsApi:
+    """Methods exposed to the embedded UI via `window.pywebview.api.*`. Used
+    by the attachment-download flow to surface a native folder picker —
+    HTML5 has no cross-platform "pick a directory" affordance, and the
+    backend can't pop a native dialog because it runs outside the AppKit
+    event loop. So the launcher (which IS the AppKit app) takes the call,
+    runs the dialog, and returns the chosen path."""
+
+    def __init__(self) -> None:
+        self._window = None
+
+    def set_window(self, window) -> None:
+        self._window = window
+
+    def choose_save_folder(self, default_dir: Optional[str] = None) -> Optional[str]:
+        # Prefer pywebview's portable folder-dialog API; it dispatches to
+        # the right native UI on each platform (NSOpenPanel on macOS,
+        # tkinter on others). We accept a default starting directory so
+        # the dialog opens where users expect (their Downloads folder).
+        import webview  # type: ignore
+        win = self._window
+        if win is None:
+            return None
+        start_dir = default_dir or str(Path.home() / "Downloads")
+        try:
+            result = win.create_file_dialog(
+                webview.FOLDER_DIALOG,
+                directory=start_dir,
+                allow_multiple=False,
+            )
+        except Exception:
+            return None
+        if not result:
+            return None
+        if isinstance(result, (list, tuple)):
+            return str(result[0]) if result else None
+        return str(result)
+
+
 def run() -> None:
     try:
         import webview  # type: ignore
@@ -1095,13 +1134,16 @@ def run() -> None:
     try:
         backend = _start_backend(base_url, env=backend_env)
         try:
+            js_api = JsApi()
             window = webview.create_window(
                 title="XEmail",
                 url=f"{base_url}/login",
                 min_size=(1360, 820),
                 width=1560,
                 height=980,
+                js_api=js_api,
             )
+            js_api.set_window(window)
             def _on_window_loaded():
                 if sys.platform == "darwin":
                     try:
@@ -1162,7 +1204,20 @@ def run() -> None:
             # and arm a SIGKILL watchdog in case WKWebView teardown wedges.
             _install_macos_terminate_cleanup(backend)
 
-            webview.start()
+            # private_mode=False + an explicit storage_path persists
+            # cookies / localStorage to disk so the user's logged-in state
+            # survives quitting the app. Without this, WKWebView throws
+            # the session cookie away on every restart and the user lands
+            # back on the login screen.
+            webview_storage = APP_ROOT / "webview_storage"
+            try:
+                webview_storage.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            webview.start(
+                private_mode=False,
+                storage_path=str(webview_storage),
+            )
         finally:
             tray.stop()
             backend.stop()
