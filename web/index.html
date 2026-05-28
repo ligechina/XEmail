@@ -479,6 +479,39 @@
         border-color: var(--primary, #2563eb);
         color: var(--primary, #2563eb);
       }
+      /* Floating mode for the prompts panel — same idea as the compose
+         window. Turns the grid column into a draggable fixed overlay; the
+         grid drops the prompts track (.layout.prompts-floating) so the
+         detail pane reclaims the freed width. */
+      .prompts.floating {
+        position: fixed;
+        top: 96px;
+        right: 24px;
+        left: auto;
+        width: var(--col-prompts, 320px);
+        max-width: 92vw;
+        height: 72vh;
+        max-height: calc(100vh - 120px);
+        z-index: 95;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        box-shadow: 0 12px 40px rgba(15, 23, 42, 0.2);
+      }
+      .prompts.floating .prompts-head {
+        cursor: move;
+        user-select: none;
+      }
+      .layout.prompts-floating {
+        grid-template-columns:
+          var(--col-sidebar)
+          6px
+          var(--col-maillist)
+          6px
+          minmax(240px, 1fr);
+      }
+      .layout.prompts-floating > .splitter[data-splitter="prompts"] {
+        display: none;
+      }
       .field-rows {
         display: flex;
         flex-direction: column;
@@ -1956,6 +1989,12 @@
         overflow-y: auto;
         padding: 0;
         min-width: 0;
+        /* Email content must always be selectable. Stated explicitly here
+           (and on the inner text-body) so an ancestor's user-select:none
+           — picked up from a future utility class or theme — can't
+           accidentally make the right pane unreadable. */
+        user-select: text;
+        -webkit-user-select: text;
       }
       .detail-body .text-body {
         padding: 20px 24px;
@@ -1963,6 +2002,9 @@
         word-break: break-word;
         font-size: 14px;
         color: var(--text);
+        user-select: text;
+        -webkit-user-select: text;
+        cursor: text;
       }
       .detail-body iframe {
         width: 100%;
@@ -1974,6 +2016,8 @@
         padding: 14px 16px;
         overflow: auto;
         min-height: 0;
+        user-select: text;
+        -webkit-user-select: text;
       }
       .thread-stack-note {
         margin: 0 0 10px;
@@ -1986,6 +2030,8 @@
         background: var(--surface);
         margin-bottom: 12px;
         overflow: hidden;
+        user-select: text;
+        -webkit-user-select: text;
       }
       /* Outgoing-reply card inside a merged thread — softer green tint so
          it's visually obvious which messages the user sent. */
@@ -2090,6 +2136,71 @@
       .compose-window .modal-head {
         cursor: move;
         user-select: none;
+      }
+      /* Right-docked mode: compose pins itself to the right edge of the
+         window like a side panel, and the main layout reserves space for
+         it via `body.compose-docked-active .layout` below. Lets the user
+         keep reading the original email while composing a reply. */
+      :root {
+        --col-compose: 460px;
+      }
+      .compose-window.docked {
+        position: fixed;
+        top: 84px;          /* topbar 56 + status 28 */
+        right: 0;
+        bottom: 0;
+        left: auto;
+        width: var(--col-compose);
+        max-width: 80vw;
+        max-height: none;
+        transform: none;
+        border-radius: 0;
+        border-left: 1px solid var(--border);
+        border-top: 1px solid var(--border);
+        border-right: 0;
+        border-bottom: 0;
+        box-shadow: -4px 0 16px rgba(15, 23, 42, 0.08);
+      }
+      .compose-window.docked .modal-head {
+        /* Drag is disabled in docked mode — moving it would race with the
+           CSS layout. The dock button toggles back to floating instead. */
+        cursor: default;
+      }
+      body.compose-docked-active .layout {
+        margin-right: var(--col-compose);
+        /* Reclaim the prompts column while the dock is open so the detail
+           pane still has room to show the email being replied to. The
+           prompts panel comes back automatically when the dock closes. */
+        grid-template-columns:
+          var(--col-sidebar)
+          6px
+          var(--col-maillist)
+          6px
+          minmax(240px, 1fr);
+      }
+      body.compose-docked-active .layout > .splitter[data-splitter="prompts"],
+      body.compose-docked-active .layout > .prompts {
+        display: none;
+      }
+      .compose-dock-toggle,
+      .prompts-dock-toggle {
+        background: var(--primary-soft);
+        border: 1px solid var(--primary);
+        color: var(--primary);
+        font: inherit;
+        font-size: 12px;
+        font-weight: 600;
+        line-height: 1.4;
+        padding: 4px 10px;
+        margin-right: 6px;
+        cursor: pointer;
+        border-radius: 6px;
+        white-space: nowrap;
+      }
+      .compose-dock-toggle:hover,
+      .prompts-dock-toggle:hover {
+        background: var(--primary);
+        color: #fff;
       }
       .close-confirm {
         position: absolute;
@@ -2866,11 +2977,18 @@
         ></div>
 
         <aside class="prompts" id="prompts_panel">
-          <div class="prompts-head">
+          <div class="prompts-head" id="prompts_drag_handle">
             <h4 style="margin: 0; padding: 0; font-size: 13px; font-weight: 600">
               智能分类设置
             </h4>
             <div style="display: flex; gap: 6px; align-items: center">
+              <button
+                class="prompts-dock-toggle"
+                id="btn_prompts_dock"
+                type="button"
+                title="悬浮为可拖动窗口 / 停靠回右侧"
+                onclick="togglePromptsFloat()"
+              >悬浮</button>
               <button
                 class="icon-btn"
                 id="btn_field_config_toggle"
@@ -3365,7 +3483,16 @@
     <div class="compose-window" id="compose_window">
       <div class="modal-head" id="compose_drag_handle">
         <h3 id="compose_title">撰写邮件</h3>
-        <button class="close-x" onclick="requestCloseCompose()" title="关闭">×</button>
+        <div style="display:flex;align-items:center;gap:2px">
+          <button
+            type="button"
+            id="btn_compose_dock"
+            class="compose-dock-toggle"
+            title="停靠到右侧 / 恢复悬浮"
+            onclick="toggleComposeDock()"
+          >停靠 →</button>
+          <button class="close-x" onclick="requestCloseCompose()" title="关闭">×</button>
+        </div>
       </div>
       <div class="modal-body">
         <div class="carry-banner" id="carry_banner">
@@ -7671,7 +7798,7 @@
             </div>`
           : "";
         const bodyHtml = showHtml
-          ? `<iframe sandbox="allow-popups allow-popups-to-escape-sandbox allow-downloads" id="${cid}_iframe"></iframe>`
+          ? `<iframe sandbox="allow-popups allow-popups-to-escape-sandbox allow-downloads allow-same-origin" id="${cid}_iframe"></iframe>`
           : wantHtml
             ? `<div class="text-body" style="color:var(--text-muted);font-style:italic">正在加载 HTML 版本…</div>`
             : `<div class="text-body">${escapeHtml(item.body || "(无正文)")}</div>`;
@@ -7990,7 +8117,7 @@
           <div class="detail-body">
             ${
               showHtml
-                ? `<iframe sandbox="allow-popups allow-popups-to-escape-sandbox allow-downloads" id="detail_iframe"></iframe>`
+                ? `<iframe sandbox="allow-popups allow-popups-to-escape-sandbox allow-downloads allow-same-origin" id="detail_iframe"></iframe>`
                 : wantHtml
                   ? `<div class="text-body" style="color:var(--text-muted);font-style:italic">正在加载 HTML 版本…</div>`
                   : `<div class="text-body">${escapeHtml(item.body || "(无正文)")}</div>`
@@ -9752,6 +9879,7 @@
           mode === "reply" ? "正在回复" : mode === "draft" ? "正在编辑草稿" : "";
         hideCloseConfirm();
         $("compose_window").classList.add("open");
+        applyComposeDockState();
         setTimeout(() => {
           if (mode === "reply") {
             const bodyEl = $("send_body");
@@ -10160,6 +10288,8 @@
         $("compose_window").classList.remove("open");
         hideCloseConfirm();
         replyingToInboxId = null;
+        // Restore full-width layout when the dock disappears.
+        document.body.classList.remove("compose-docked-active");
       }
 
       function isComposeDirty() {
@@ -10862,14 +10992,37 @@
       }
 
       const PROMPTS_HIDDEN_STORAGE_KEY = "xemail_prompts_hidden";
+      const PROMPTS_FLOATING_STORAGE_KEY = "xemail_prompts_floating";
 
-      function applyPromptsVisibility(hidden) {
+      // The prompts panel has three visual states, mirroring the compose
+      // window: hidden, docked (grid column), and floating (draggable
+      // overlay). `hidden` wins over `floating`; the two prefs persist
+      // independently so toggling visibility doesn't lose the float choice.
+      function applyPromptsState() {
         const layout = $("layout");
-        if (layout) layout.classList.toggle("prompts-hidden", !!hidden);
-        const btn = $("btn_toggle_prompts");
-        if (btn) {
-          btn.title = hidden ? t("显示右侧智能分类设置面板") : t("隐藏右侧智能分类设置面板");
-          btn.classList.toggle("active", !!hidden);
+        const panel = $("prompts_panel");
+        if (!layout) return;
+        const hidden = loadPromptsHidden();
+        const floating = loadPromptsFloating();
+        const showFloating = !hidden && floating;
+        layout.classList.toggle("prompts-hidden", hidden);
+        layout.classList.toggle("prompts-floating", showFloating);
+        if (panel) panel.classList.toggle("floating", showFloating);
+        // Clear any dragged offset when docking so it snaps back into the grid.
+        if (panel && !floating) {
+          panel.style.left = "";
+          panel.style.top = "";
+          panel.style.right = "";
+        }
+        const tbtn = $("btn_toggle_prompts");
+        if (tbtn) {
+          tbtn.title = hidden ? t("显示右侧智能分类设置面板") : t("隐藏右侧智能分类设置面板");
+          tbtn.classList.toggle("active", hidden);
+        }
+        const mbtn = $("btn_prompts_dock");
+        if (mbtn) {
+          mbtn.textContent = floating ? "停靠" : "悬浮";
+          mbtn.title = floating ? "停靠回右侧栏" : "悬浮为可拖动窗口";
         }
       }
 
@@ -10893,14 +11046,76 @@
         } catch (_) {}
       }
 
+      function loadPromptsFloating() {
+        try {
+          return localStorage.getItem(PROMPTS_FLOATING_STORAGE_KEY) === "1";
+        } catch (_) {
+          return false;
+        }
+      }
+
+      function savePromptsFloating(floating) {
+        try {
+          localStorage.setItem(PROMPTS_FLOATING_STORAGE_KEY, floating ? "1" : "0");
+        } catch (_) {}
+      }
+
       function togglePromptsPanel() {
-        const next = !loadPromptsHidden();
-        savePromptsHidden(next);
-        applyPromptsVisibility(next);
+        savePromptsHidden(!loadPromptsHidden());
+        applyPromptsState();
+      }
+
+      function togglePromptsFloat() {
+        savePromptsFloating(!loadPromptsFloating());
+        applyPromptsState();
       }
 
       function setupPromptsToggle() {
-        applyPromptsVisibility(loadPromptsHidden());
+        applyPromptsState();
+      }
+
+      function setupPromptsDrag() {
+        const handle = $("prompts_drag_handle");
+        const panel = $("prompts_panel");
+        if (!handle || !panel) return;
+        let dragging = false;
+        let offX = 0;
+        let offY = 0;
+
+        handle.addEventListener("mousedown", (e) => {
+          // Buttons in the head (悬浮/停靠, ⚙, ✕) shouldn't start a drag.
+          if (e.target.closest("button")) return;
+          // Only draggable while floating.
+          if (!panel.classList.contains("floating")) return;
+          dragging = true;
+          const rect = panel.getBoundingClientRect();
+          offX = e.clientX - rect.left;
+          offY = e.clientY - rect.top;
+          panel.style.left = rect.left + "px";
+          panel.style.top = rect.top + "px";
+          panel.style.right = "auto";
+          document.body.style.userSelect = "none";
+          e.preventDefault();
+        });
+
+        window.addEventListener("mousemove", (e) => {
+          if (!dragging) return;
+          const minVisible = 120;
+          const minLeft = -(panel.offsetWidth - minVisible);
+          const maxLeft = window.innerWidth - minVisible;
+          const minTop = 0;
+          const maxTop = window.innerHeight - 44;
+          const nx = Math.max(minLeft, Math.min(maxLeft, e.clientX - offX));
+          const ny = Math.max(minTop, Math.min(maxTop, e.clientY - offY));
+          panel.style.left = nx + "px";
+          panel.style.top = ny + "px";
+        });
+
+        window.addEventListener("mouseup", () => {
+          if (!dragging) return;
+          dragging = false;
+          document.body.style.userSelect = "";
+        });
       }
 
       function showLlmKeyModal() {
@@ -10927,6 +11142,49 @@
         }
       }
 
+      // Compose-window dock state. Two visual modes share the same DOM:
+      //   floating  → centered, draggable, overlays the main content (default)
+      //   docked    → pinned to the right side, layout shifts left to make
+      //               room so the user can still see the email they're
+      //               replying to. Preference is per-browser via localStorage.
+      const COMPOSE_DOCK_KEY = "xemail_compose_docked";
+
+      function isComposeDocked() {
+        try {
+          return localStorage.getItem(COMPOSE_DOCK_KEY) === "1";
+        } catch (_) {
+          return false;
+        }
+      }
+
+      function applyComposeDockState() {
+        const win = $("compose_window");
+        if (!win) return;
+        const docked = isComposeDocked();
+        const open = win.classList.contains("open");
+        win.classList.toggle("docked", docked);
+        // The layout only needs to shrink when the dock is actually visible.
+        document.body.classList.toggle("compose-docked-active", docked && open);
+        // Any inline left/top from a previous drag would override the docked
+        // anchor — wipe them whenever the mode changes.
+        win.style.left = "";
+        win.style.top = "";
+        win.style.transform = "";
+        const btn = $("btn_compose_dock");
+        if (btn) {
+          btn.textContent = docked ? "← 悬浮" : "停靠 →";
+          btn.title = docked ? "恢复为悬浮窗口" : "停靠到右侧（与邮件并排）";
+        }
+      }
+
+      function toggleComposeDock() {
+        const next = !isComposeDocked();
+        try {
+          localStorage.setItem(COMPOSE_DOCK_KEY, next ? "1" : "0");
+        } catch (_) {}
+        applyComposeDockState();
+      }
+
       function setupDrag() {
         const handle = $("compose_drag_handle");
         const win = $("compose_window");
@@ -10936,6 +11194,10 @@
 
         handle.addEventListener("mousedown", (e) => {
           if (e.target.closest(".close-x")) return;
+          if (e.target.closest(".compose-dock-toggle")) return;
+          // Docked compose is grid-anchored — dragging it would race with
+          // CSS layout and confuse the user.
+          if (win.classList.contains("docked")) return;
           dragging = true;
           const rect = win.getBoundingClientRect();
           offX = e.clientX - rect.left;
@@ -10978,8 +11240,10 @@
         updateMergeToggleButton();
         renderFolders();
         setupDrag();
+        applyComposeDockState();
         setupColumnSplitters();
         setupPromptsToggle();
+        setupPromptsDrag();
         setupFolderContextMenu();
         checkLlmApiKey();
         const searchInput = $("mail_search_keyword");

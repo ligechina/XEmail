@@ -95,6 +95,41 @@ def _read_build_version() -> str:
     return text or "dev"
 
 
+def _clear_webview_http_cache() -> None:
+    # WKWebView (started with private_mode=False) keeps a persistent HTTP
+    # NetworkCache under ~/Library/Caches/<AppName>/WebKit/. After a pkg
+    # upgrade that ships new web/ assets, that cache can keep painting the
+    # OLD index.html even though the backend now serves fresh files —
+    # exactly the "I don't see the new button" symptom. We delete just the
+    # HTTP cache; cookies / localStorage live under
+    # ~/Library/WebKit/<AppName>/WebsiteData and are left intact so the user
+    # stays logged in.
+    if sys.platform != "darwin":
+        return
+    caches_root = Path.home() / "Library" / "Caches"
+    # The cache folder is keyed by the bundle name; cover the names this app
+    # is known to register under.
+    for name in ("XEmail", "com.xemail.app"):
+        webkit_dir = caches_root / name / "WebKit"
+        for sub in ("NetworkCache", "CacheStorage"):
+            target = webkit_dir / sub
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+
+
+def _maybe_clear_webview_cache_on_upgrade() -> None:
+    # Only clear on a version change so normal launches stay fast. The
+    # cleared-version stamp lives in launcher_config.json next to the
+    # data-dir prompt stamp.
+    cfg = _load_launcher_config()
+    build_version = _read_build_version()
+    if cfg.get("webcache_cleared_version") == build_version:
+        return
+    _clear_webview_http_cache()
+    cfg["webcache_cleared_version"] = build_version
+    _save_launcher_config(cfg)
+
+
 def _choose_data_dir_via_nsopenpanel(default_dir: Path) -> Optional[Path]:
     # Show a native macOS "choose folder" dialog inside our own process
     # instead of shelling out to osascript. Returns the chosen path, or
@@ -249,6 +284,84 @@ def _is_backend_healthy(base_url: str) -> bool:
         return False
     except TimeoutError:
         return False
+
+
+def _running_backend_data_dir(base_url: str) -> Optional[str]:
+    # Returns whatever `data_dir` the running backend reports via /health,
+    # or None if it didn't (older builds) / health failed. Used to decide
+    # whether an already-running backend can be reused after the user picks
+    # a data directory in the launcher.
+    try:
+        with urlopen(f"{base_url}/health", timeout=1.0) as resp:
+            if resp.status != 200:
+                return None
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+    value = payload.get("data_dir") if isinstance(payload, dict) else None
+    if not isinstance(value, str) or not value:
+        return None
+    return value
+
+
+def _normalize_dir(path_str: str) -> str:
+    # Resolve to an absolute, symlink-free path so two equivalent spellings
+    # (e.g. "/Users/.../XEmail/data" vs "/Users/.../XEmail/data/") compare
+    # equal. We don't require the dir to exist — `resolve(strict=False)`.
+    try:
+        return str(Path(path_str).expanduser().resolve(strict=False))
+    except Exception:
+        return path_str.rstrip("/")
+
+
+def _kill_listener_on_port(host: str, port: int, *, timeout: float = 5.0) -> bool:
+    # Best-effort: SIGTERM (then SIGKILL) whichever process is bound to
+    # (host, port). Used when the launcher detects an orphan backend left
+    # over from a previous install — that backend is still pointing at the
+    # old XEMAIL_DATA_DIR and would happily serve requests against the
+    # wrong users.json, causing "user/password error" after an upgrade.
+    try:
+        result = subprocess.run(
+            ["lsof", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return False
+    pids = [int(tok) for tok in result.stdout.split() if tok.isdigit()]
+    if not pids:
+        return not _is_tcp_port_busy(host, port)
+
+    import signal as _signal
+
+    for pid in pids:
+        try:
+            os.kill(pid, _signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        except Exception:
+            continue
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not _is_tcp_port_busy(host, port):
+            return True
+        time.sleep(0.1)
+
+    for pid in pids:
+        try:
+            os.kill(pid, _signal.SIGKILL)
+        except Exception:
+            continue
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        if not _is_tcp_port_busy(host, port):
+            return True
+        time.sleep(0.1)
+    return not _is_tcp_port_busy(host, port)
 
 
 @dataclass
@@ -886,6 +999,96 @@ def _set_macos_activation_policy_regular() -> None:
         pass
 
 
+def _install_macos_main_menu() -> None:
+    # Install a standard application menu bar with an Edit menu. Without this,
+    # AppKit has nowhere to route Cmd-C / Cmd-X / Cmd-V / Cmd-A key equivalents,
+    # so the user cannot copy selected text from the email content pane (or any
+    # other webview content). pywebview does not install one by default.
+    if sys.platform != "darwin":
+        return
+    try:
+        from AppKit import (  # type: ignore
+            NSApplication,
+            NSEventModifierFlagCommand,
+            NSEventModifierFlagShift,
+            NSMenu,
+            NSMenuItem,
+        )
+    except Exception:
+        return
+
+    app = NSApplication.sharedApplication()
+    if app.mainMenu() is not None:
+        # Some pywebview versions / future updates may install one — don't
+        # overwrite, just make sure an Edit menu is present.
+        existing = app.mainMenu()
+        for i in range(existing.numberOfItems()):
+            sub = existing.itemAtIndex_(i).submenu()
+            if sub is not None and sub.title() in ("Edit", "编辑"):
+                return
+
+    main_menu = NSMenu.alloc().init()
+
+    # First menu slot is the application menu; macOS replaces the title with
+    # the bundle name at display time, but we still need to provide submenu
+    # items so Quit picks up its Cmd-Q shortcut.
+    app_item = NSMenuItem.alloc().init()
+    main_menu.addItem_(app_item)
+    app_menu = NSMenu.alloc().initWithTitle_("XEmail")
+    hide_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "隐藏 XEmail", "hide:", "h"
+    )
+    app_menu.addItem_(hide_item)
+    hide_others = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "隐藏其他", "hideOtherApplications:", "h"
+    )
+    hide_others.setKeyEquivalentModifierMask_(
+        NSEventModifierFlagCommand | NSEventModifierFlagShift
+    )
+    app_menu.addItem_(hide_others)
+    app_menu.addItem_(NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "显示全部", "unhideAllApplications:", ""
+    ))
+    app_menu.addItem_(NSMenuItem.separatorItem())
+    app_menu.addItem_(NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "退出 XEmail", "terminate:", "q"
+    ))
+    app_item.setSubmenu_(app_menu)
+
+    # Edit menu — the actual reason we install a menu bar. The selectors
+    # below are the standard AppKit responder-chain actions; WKWebView
+    # implements them natively for text selection / form fields.
+    edit_item = NSMenuItem.alloc().init()
+    main_menu.addItem_(edit_item)
+    edit_menu = NSMenu.alloc().initWithTitle_("编辑")
+    edit_menu.addItem_(NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "撤销", "undo:", "z"
+    ))
+    redo_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "重做", "redo:", "Z"
+    )
+    redo_item.setKeyEquivalentModifierMask_(
+        NSEventModifierFlagCommand | NSEventModifierFlagShift
+    )
+    edit_menu.addItem_(redo_item)
+    edit_menu.addItem_(NSMenuItem.separatorItem())
+    edit_menu.addItem_(NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "剪切", "cut:", "x"
+    ))
+    edit_menu.addItem_(NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "复制", "copy:", "c"
+    ))
+    edit_menu.addItem_(NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "粘贴", "paste:", "v"
+    ))
+    edit_menu.addItem_(NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "全选", "selectAll:", "a"
+    ))
+    edit_item.setSubmenu_(edit_menu)
+
+    app.setMainMenu_(main_menu)
+
+
 def _set_macos_app_icon(icon_candidates: Optional[list[Path]] = None) -> None:
     if sys.platform != "darwin":
         return
@@ -1021,14 +1224,30 @@ def _start_backend(base_url: str, *, env: dict[str, str]) -> BackendHandle:
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 
     # If something is already serving this port and responds to /health,
-    # reuse it instead of starting another backend.
+    # reuse it — UNLESS it's bound to a different XEMAIL_DATA_DIR than the
+    # one the user just chose. That mismatch case is the upgrade-install
+    # bug: an orphan uvicorn from the previous version is still on port
+    # 8000, pointing at the old data dir, so login fails against the
+    # user's actual users.json. In that case kill the orphan and start
+    # a fresh backend bound to the chosen directory.
     if _is_tcp_port_busy(HOST, PORT):
         if _is_backend_healthy(base_url):
-            return BackendHandle(reused_existing=True)
-        raise RuntimeError(
-            f"端口 {PORT} 已被占用，但不是可用的 XEmail 后端。"
-            "请先释放端口或设置 XEMAIL_PORT。"
-        )
+            intended = _normalize_dir(env.get("XEMAIL_DATA_DIR", ""))
+            running = _running_backend_data_dir(base_url)
+            running_norm = _normalize_dir(running) if running else ""
+            if not intended or not running_norm or intended == running_norm:
+                return BackendHandle(reused_existing=True)
+            # Mismatch: stale backend from a previous install/version.
+            if not _kill_listener_on_port(HOST, PORT):
+                raise RuntimeError(
+                    f"端口 {PORT} 上有另一个 XEmail 后端 (data_dir={running})，"
+                    f"无法切换到所选目录 ({intended})。请手动结束该进程后重试。"
+                )
+        else:
+            raise RuntimeError(
+                f"端口 {PORT} 已被占用，但不是可用的 XEmail 后端。"
+                "请先释放端口或设置 XEMAIL_PORT。"
+            )
 
     python_bin = _pick_python()
     log_fp = LOG_FILE.open("w", encoding="utf-8")
@@ -1130,6 +1349,11 @@ def run() -> None:
     # at runtime with a single-resolution PNG was producing a second, oversized
     # Dock entry with a white border alongside the real icon.
     _set_macos_activation_policy_regular()
+    _install_macos_main_menu()
+    # Drop any stale WKWebView HTTP cache from a previous version so the
+    # freshly-installed web/ assets actually paint (no more "the new button
+    # isn't there" after an upgrade).
+    _maybe_clear_webview_cache_on_upgrade()
     lock.acquire()
     try:
         backend = _start_backend(base_url, env=backend_env)

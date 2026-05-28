@@ -29,7 +29,7 @@ The easiest way is the prebuilt installer for your OS.
 | Platform | Artifact | Notes |
 | --- | --- | --- |
 | macOS (Apple Silicon) | `xemail-macos-installer-*.pkg` | Double-click to install into `/Applications/XEmail.app`. Bundles a self-contained Python runtime. |
-| Windows | `xemail-windows-installer-*.zip` (未经测试) | Unzip, then run `install_windows.bat`. Requires Python 3.10+ on PATH (`py -3`). |
+| Windows | `xemail-windows-installer-*.zip` | Unzip, then run `install_windows.bat`. Requires Python 3.10+ on PATH (`py -3`). |
 | Server / source | `xemail-release-*.tar.gz` or this repo | See [Run from source](#run-from-source--从源码运行) below. |
 
 Release binaries are published on the

@@ -338,23 +338,43 @@ def _humanize_email_error(prefix: str, exc: Exception) -> str:
     return f"{prefix}失败: {raw}"
 
 
+# WKWebView (pywebview, private_mode=False) persists its URLCache across
+# launches, so without explicit no-cache headers the desktop app can keep
+# serving a STALE index.html long after a pkg upgrade has dropped fresh
+# HTML on disk — users then see "the new feature isn't there" because the
+# webview painted last week's bundle. Apply to every server-rendered HTML
+# entrypoint; static assets (logo / favicon / i18n.js) are fine to cache.
+_NO_HTML_CACHE_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
+
 @app.get("/")
 def home() -> FileResponse:
     if not WEB_INDEX.exists():
         raise HTTPException(status_code=404, detail="Web page not found.")
-    return FileResponse(WEB_INDEX)
+    return FileResponse(WEB_INDEX, headers=_NO_HTML_CACHE_HEADERS)
 
 
 @app.get("/settings")
 def settings_page() -> FileResponse:
     if not WEB_SETTINGS.exists():
         raise HTTPException(status_code=404, detail="Settings page not found.")
-    return FileResponse(WEB_SETTINGS)
+    return FileResponse(WEB_SETTINGS, headers=_NO_HTML_CACHE_HEADERS)
 
 
 @app.get("/health")
 def health() -> Dict[str, str]:
-    return {"status": "ok"}
+    # `data_dir` is included so the desktop launcher can tell whether an
+    # already-running backend on port 8000 is bound to the same data
+    # directory the user just chose. Without this, an orphan uvicorn left
+    # over from a previous install would silently serve requests against
+    # the wrong users.json after an upgrade, and login would fail.
+    from app.storage import DATA_DIR
+
+    return {"status": "ok", "data_dir": str(DATA_DIR)}
 
 
 WEB_LOGIN = WEB_DIR / "login.html"
@@ -366,7 +386,7 @@ WEB_CONTACTS = WEB_DIR / "contacts.html"
 def login_page() -> FileResponse:
     if not WEB_LOGIN.exists():
         raise HTTPException(status_code=404, detail="Login page not found.")
-    return FileResponse(WEB_LOGIN)
+    return FileResponse(WEB_LOGIN, headers=_NO_HTML_CACHE_HEADERS)
 
 
 @app.get("/admin")
@@ -374,14 +394,14 @@ def admin_page() -> FileResponse:
     # Auth check happens client-side via /api/auth/me; this just serves the HTML.
     if not WEB_ADMIN.exists():
         raise HTTPException(status_code=404, detail="Admin page not found.")
-    return FileResponse(WEB_ADMIN)
+    return FileResponse(WEB_ADMIN, headers=_NO_HTML_CACHE_HEADERS)
 
 
 @app.get("/contacts")
 def contacts_page() -> FileResponse:
     if not WEB_CONTACTS.exists():
         raise HTTPException(status_code=404, detail="Contacts page not found.")
-    return FileResponse(WEB_CONTACTS)
+    return FileResponse(WEB_CONTACTS, headers=_NO_HTML_CACHE_HEADERS)
 
 
 WEB_FAVICON = WEB_DIR / "favicon.svg"

@@ -29,4 +29,5 @@ echo "==> 4) 重启 Dock 以刷新图标缓存"
 killall Dock
 sleep 1
 
-echo "==> 5) done。现在双击新 pkg 安装.
+echo "==> 5) done。现在双击新 pkg 安装："
+ls -lt dist/xemail-macos-installer-*.pkg 2>/dev/null | head -1
