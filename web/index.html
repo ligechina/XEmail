@@ -10961,32 +10961,46 @@
             saveLayoutWidths(state);
           });
 
-          el.addEventListener("mousedown", (ev) => {
+          // Pointer Events + setPointerCapture so move/up are delivered here
+          // even when the cursor crosses the email-body iframe or leaves the
+          // window — window-level mousemove/mouseup would otherwise be lost,
+          // causing the drag to stall mid-resize or refuse to stop on release.
+          el.addEventListener("pointerdown", (ev) => {
+            if (ev.button !== 0) return;
             ev.preventDefault();
             const startX = ev.clientX;
             const startW = state[key];
             // Dragging the rightmost splitter shrinks the prompts column when
             // the cursor moves right, so flip the sign for that one.
             const dir = key === "prompts" ? -1 : 1;
+            const pointerId = ev.pointerId;
             el.classList.add("dragging");
             document.body.classList.add("col-resizing");
+            try { el.setPointerCapture(pointerId); } catch (_) {}
 
             const onMove = (e) => {
+              if (e.pointerId !== pointerId) return;
               const delta = (e.clientX - startX) * dir;
               const max = maxFor(key, state);
               const next = Math.min(max, Math.max(LAYOUT_MINS[key], startW + delta));
               state[key] = next;
               applyLayoutWidths(state);
             };
-            const onUp = () => {
-              window.removeEventListener("mousemove", onMove);
-              window.removeEventListener("mouseup", onUp);
+            const onEnd = (e) => {
+              if (e && e.pointerId != null && e.pointerId !== pointerId) return;
+              el.removeEventListener("pointermove", onMove);
+              el.removeEventListener("pointerup", onEnd);
+              el.removeEventListener("pointercancel", onEnd);
+              el.removeEventListener("lostpointercapture", onEnd);
               el.classList.remove("dragging");
               document.body.classList.remove("col-resizing");
+              try { el.releasePointerCapture(pointerId); } catch (_) {}
               saveLayoutWidths(state);
             };
-            window.addEventListener("mousemove", onMove);
-            window.addEventListener("mouseup", onUp);
+            el.addEventListener("pointermove", onMove);
+            el.addEventListener("pointerup", onEnd);
+            el.addEventListener("pointercancel", onEnd);
+            el.addEventListener("lostpointercapture", onEnd);
           });
         });
       }
