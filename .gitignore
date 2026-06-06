@@ -14,7 +14,6 @@ __pycache__/
 .claude/
 
 # Release packaging output
-dist/
 .packaging_tmp/
 
 # Local runtime data — never commit user mail, credentials, or runtime logs.
