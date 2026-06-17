@@ -43,6 +43,14 @@
       html,
       body {
         height: 100%;
+        /* Never let the document itself scroll. The app shell occupies
+           exactly the viewport and every scrollable region (mail list,
+           detail pane, prompts panel, modal bodies) opts in with its own
+           overflow:auto. Without this lock the whole window slides under
+           mouse-wheel / trackpad gestures whenever any nested element's
+           intrinsic height briefly exceeds its flex/grid track — most
+           visibly when an HTML-email iframe is sized to its content. */
+        overflow: hidden;
       }
       body {
         margin: 0;
@@ -57,6 +65,9 @@
         display: flex;
         flex-direction: column;
         height: 100vh;
+        /* Belt-and-suspenders: even if the body lock above is overridden by
+           a future theme rule, the shell still clips its own overflow. */
+        overflow: hidden;
       }
       header.topbar {
         display: flex;
