@@ -2012,6 +2012,31 @@
         border: 0;
         background: #fff;
       }
+      /* Single-email view: the header + meta + attachment chips + tabs +
+         body all live inside .detail-scroll, which is the sole scroller
+         for the right pane. This frees the reading area to expand when
+         the user scrolls (the action bar / 收件人 chips no longer hog a
+         pinned strip at the top), matching the merged-thread layout. */
+      .detail-scroll {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+      }
+      .detail-scroll .detail-body {
+        flex: none;
+        overflow: visible;
+      }
+      .detail-scroll .detail-body iframe {
+        /* Without an explicit height an iframe collapses to ~0px when its
+           container doesn't constrain it. Start tall enough to be visible
+           before JS measures; the load handler then shrinks/grows it to
+           the document's real scrollHeight so the outer scroll covers it
+           cleanly with no inner scrollbar. */
+        height: 70vh;
+        display: block;
+      }
       .thread-stack {
         padding: 14px 16px;
         overflow: auto;
@@ -6143,7 +6168,121 @@
         saveAttachmentsBatch(items);
       });
 
-      function buildSafeHtmlSrcdoc(rawHtml) {
+      // Make the single-email iframe grow to fit its content so the outer
+      // .detail-scroll handles all scrolling (header + body together) — no
+      // inner scrollbar, no pinned header strip. Width changes (splitter
+      // drag, sidebar toggle) and slow image loads both reflow the body, so
+      // we observe the inner <body> as well as window resizes. Idempotent:
+      // re-attaching to the same iframe just replaces the prior listeners.
+      // Only one #detail_iframe is alive at a time; track its teardown so a
+      // re-render (user clicks another email, switches HTML/纯文本 tabs) or
+      // a navigation away doesn't strand the previous iframe's window
+      // 'resize' listener and ResizeObserver.
+      let _activeEmailIframeCleanup = null;
+
+      function _autoResizeEmailIframe(iframe) {
+        if (!iframe) return;
+        if (_activeEmailIframeCleanup) {
+          try { _activeEmailIframeCleanup(); } catch (_) {}
+          _activeEmailIframeCleanup = null;
+        }
+        let observer = null;
+        function measure() {
+          const doc = iframe.contentDocument;
+          const body = doc && doc.body;
+          if (!body) return;
+          // scrollHeight on the documentElement catches absolute-positioned
+          // children that body's scrollHeight misses on some templates.
+          const h = Math.max(
+            body.scrollHeight,
+            (doc.documentElement && doc.documentElement.scrollHeight) || 0
+          );
+          if (h > 0) iframe.style.height = h + "px";
+        }
+        function onLoad() {
+          measure();
+          const doc = iframe.contentDocument;
+          if (doc && "ResizeObserver" in window) {
+            observer = new ResizeObserver(() => measure());
+            observer.observe(doc.documentElement);
+            if (doc.body) observer.observe(doc.body);
+          }
+          // Marketing emails commonly lazy-load images; re-measure after
+          // each one resolves so the iframe doesn't truncate the tail.
+          if (doc) {
+            for (const img of doc.images || []) {
+              if (img.complete) continue;
+              img.addEventListener("load", measure, { once: true });
+              img.addEventListener("error", measure, { once: true });
+            }
+          }
+        }
+        // Width may have changed (column splitter drag, sidebar toggle);
+        // remeasure after the iframe's internal reflow settles.
+        const resizeHandler = () => measure();
+        iframe.addEventListener("load", onLoad);
+        window.addEventListener("resize", resizeHandler);
+        _activeEmailIframeCleanup = () => {
+          iframe.removeEventListener("load", onLoad);
+          window.removeEventListener("resize", resizeHandler);
+          if (observer) observer.disconnect();
+        };
+      }
+
+      // Resolve a `cid:` URL against the email's attachment list and return
+      // the loopback URL the iframe can actually fetch — or null if no match.
+      // HTML emails reference inline images via `<img src="cid:foo@bar">`,
+      // where `foo@bar` is the part's Content-ID. Browsers don't speak the
+      // cid: scheme, so without rewriting these we get the broken-image
+      // placeholder (this is the「？」icon users see on Outlook/Apple mail).
+      //
+      // Matching strategy, from most to least precise:
+      //   1. exact filename match (Outlook style: `cid:image001.png@01D...`)
+      //   2. stem-before-`@` matches an attachment's stem (any extension)
+      //   3. positional fallback: `cid:NNN` → Nth attachment, when NNN parses
+      //      as an integer index. Catches a few low-end mailers.
+      // Returns the chosen attachment filename, or null if nothing matched.
+      function _resolveCidFilename(cidPayload, attachments) {
+        if (!cidPayload || !Array.isArray(attachments) || !attachments.length) {
+          return null;
+        }
+        let payload = cidPayload;
+        // Some mailers wrap the CID in angle brackets even after stripping the
+        // scheme, others URL-encode it. Try to undo both.
+        try { payload = decodeURIComponent(payload); } catch (_) {}
+        payload = payload.replace(/^<+|>+$/g, "").trim();
+        if (!payload) return null;
+        const lowerPayload = payload.toLowerCase();
+        const namesLower = attachments.map((a) =>
+          ((a && a.filename) || "").toLowerCase()
+        );
+
+        // 1) exact filename match.
+        let idx = namesLower.indexOf(lowerPayload);
+        if (idx >= 0) return attachments[idx].filename;
+
+        // 2) match the part before `@` against either the full filename or
+        //    the stem of an attachment.
+        const head = lowerPayload.split("@", 1)[0];
+        if (head && head !== lowerPayload) {
+          idx = namesLower.indexOf(head);
+          if (idx >= 0) return attachments[idx].filename;
+          for (let i = 0; i < namesLower.length; i++) {
+            const name = namesLower[i];
+            const stem = name.replace(/\.[^.]+$/, "");
+            if (stem && stem === head) return attachments[i].filename;
+          }
+        }
+
+        // 3) positional `cid:0`, `cid:1`… — rare, but free to support.
+        if (/^\d+$/.test(payload)) {
+          const n = Number(payload);
+          if (n >= 0 && n < attachments.length) return attachments[n].filename;
+        }
+        return null;
+      }
+
+      function buildSafeHtmlSrcdoc(rawHtml, emailId, attachments) {
         const parser = new DOMParser();
         const doc = parser.parseFromString(String(rawHtml || ""), "text/html");
         const base = doc.createElement("base");
@@ -6156,6 +6295,27 @@
           a.setAttribute("target", "_blank");
           a.setAttribute("rel", "noopener noreferrer");
         });
+
+        // Rewrite inline `<img src="cid:...">` references to point at the
+        // attachment download endpoint. Same-origin iframe + allow-same-origin
+        // on the sandbox means the session cookie travels with the GET, so
+        // current_user resolves and the FileResponse comes back inline.
+        if (emailId && Array.isArray(attachments) && attachments.length) {
+          const encId = encodeURIComponent(String(emailId));
+          doc.querySelectorAll("img[src]").forEach((img) => {
+            const raw = (img.getAttribute("src") || "").trim();
+            if (!raw) return;
+            const m = raw.match(/^cid:(.+)$/i);
+            if (!m) return;
+            const fname = _resolveCidFilename(m[1], attachments);
+            if (!fname) return;
+            img.setAttribute(
+              "src",
+              `/api/attachments/${encId}/${encodeURIComponent(fname)}`
+            );
+          });
+        }
+
         return "<!doctype html>\n" + doc.documentElement.outerHTML;
       }
 
@@ -7938,7 +8098,11 @@
         if (cid) {
           const iframe = document.getElementById(`${cid}_iframe`);
           if (iframe && item.body_html) {
-            iframe.srcdoc = buildSafeHtmlSrcdoc(item.body_html || "");
+            iframe.srcdoc = buildSafeHtmlSrcdoc(
+              item.body_html || "",
+              item.id,
+              item.attachments
+            );
           }
         }
 
@@ -8079,53 +8243,61 @@
         const showReplyAll = (toAddrs.length + ccAddrs.length) > 1
           || (ccAddrs.length >= 1 && toAddrs.length >= 1);
         root.innerHTML = `
-          <div class="detail-header">
-            <div class="detail-header-main">
-              <h2 class="subject">${importantTag}${escapeHtml(item.subject || "(无主题)")}</h2>
-              <div class="detail-meta">
-                ${fromRow}
-                ${toRow}
-                ${ccRow}
-                <div><span class="label">时间:</span>${escapeHtml(item.received_at)}</div>
-                <div><span class="label">分类:</span>${escapeHtml(item.category)}${repliedTag}</div>
+          <div class="detail-scroll">
+            <div class="detail-header">
+              <div class="detail-header-main">
+                <h2 class="subject">${importantTag}${escapeHtml(item.subject || "(无主题)")}</h2>
+                <div class="detail-meta">
+                  ${fromRow}
+                  ${toRow}
+                  ${ccRow}
+                  <div><span class="label">时间:</span>${escapeHtml(item.received_at)}</div>
+                  <div><span class="label">分类:</span>${escapeHtml(item.category)}${repliedTag}</div>
+                </div>
+              </div>
+              <div class="detail-header-actions">
+                <button class="btn btn-primary" id="btn_reply">↩ 回复</button>
+                ${showReplyAll ? '<button class="btn" id="btn_reply_all" title="把所有收件人/抄送的人一起放入回复的收件人">全部回复</button>' : ""}
+                <button class="btn" id="btn_forward" title="${t("转发此邮件")}">${t("➡ 转发")}</button>
+                <button class="${importantBtnCls}" id="btn_important">${importantLabel}</button>
+                ${handledBtnHtml}
+                <button class="btn" id="btn_pin">${pinLabel}</button>
+                <button class="btn" id="btn_unread">✉ 标记未读</button>
+                <div class="move-menu">
+                  <button class="btn" id="btn_move">📁 移动到 ▾</button>
+                  <div class="move-menu-list" id="move_menu_list">${moveItems}</div>
+                </div>
+                <button class="btn btn-danger" id="btn_trash">${t("🗑 删除")}</button>
               </div>
             </div>
-            <div class="detail-header-actions">
-              <button class="btn btn-primary" id="btn_reply">↩ 回复</button>
-              ${showReplyAll ? '<button class="btn" id="btn_reply_all" title="把所有收件人/抄送的人一起放入回复的收件人">全部回复</button>' : ""}
-              <button class="btn" id="btn_forward" title="${t("转发此邮件")}">${t("➡ 转发")}</button>
-              <button class="${importantBtnCls}" id="btn_important">${importantLabel}</button>
-              ${handledBtnHtml}
-              <button class="btn" id="btn_pin">${pinLabel}</button>
-              <button class="btn" id="btn_unread">✉ 标记未读</button>
-              <div class="move-menu">
-                <button class="btn" id="btn_move">📁 移动到 ▾</button>
-                <div class="move-menu-list" id="move_menu_list">${moveItems}</div>
-              </div>
-              <button class="btn btn-danger" id="btn_trash">${t("🗑 删除")}</button>
-            </div>
-          </div>
-          ${renderAttachmentsSection(item.id, item.attachments)}
-          ${
-            hasHtmlCapability
-              ? `<div class="view-tabs">
-                  <button class="tab ${currentView === "html" ? "active" : ""}" data-view="html">HTML</button>
-                  <button class="tab ${currentView === "text" ? "active" : ""}" data-view="text">纯文本</button>
-                </div>`
-              : ""
-          }
-          <div class="detail-body">
+            ${renderAttachmentsSection(item.id, item.attachments)}
             ${
-              showHtml
-                ? `<iframe sandbox="allow-popups allow-popups-to-escape-sandbox allow-downloads allow-same-origin" id="detail_iframe"></iframe>`
-                : wantHtml
-                  ? `<div class="text-body" style="color:var(--text-muted);font-style:italic">正在加载 HTML 版本…</div>`
-                  : `<div class="text-body">${escapeHtml(item.body || "(无正文)")}</div>`
+              hasHtmlCapability
+                ? `<div class="view-tabs">
+                    <button class="tab ${currentView === "html" ? "active" : ""}" data-view="html">HTML</button>
+                    <button class="tab ${currentView === "text" ? "active" : ""}" data-view="text">纯文本</button>
+                  </div>`
+                : ""
             }
+            <div class="detail-body">
+              ${
+                showHtml
+                  ? `<iframe sandbox="allow-popups allow-popups-to-escape-sandbox allow-downloads allow-same-origin" id="detail_iframe"></iframe>`
+                  : wantHtml
+                    ? `<div class="text-body" style="color:var(--text-muted);font-style:italic">正在加载 HTML 版本…</div>`
+                    : `<div class="text-body">${escapeHtml(item.body || "(无正文)")}</div>`
+              }
+            </div>
           </div>`;
 
         if (showHtml) {
-          $("detail_iframe").srcdoc = buildSafeHtmlSrcdoc(item.body_html || "");
+          const iframeEl = $("detail_iframe");
+          _autoResizeEmailIframe(iframeEl);
+          iframeEl.srcdoc = buildSafeHtmlSrcdoc(
+            item.body_html || "",
+            item.id,
+            item.attachments
+          );
         }
         $("btn_reply").onclick = () => replyToEmail(item);
         const btnAll = $("btn_reply_all");
