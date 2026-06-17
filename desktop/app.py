@@ -1195,9 +1195,14 @@ def _activate_window_and_focus_input(window) -> None:
 
 
 def _has_user_state(data_dir: Path) -> bool:
+    # After the JSON→SQLite migration, real users have only `xemail.db`. The
+    # JSON names are kept in this probe so the desktop launcher can still
+    # detect "you have data from a pre-SQLite install in the legacy location"
+    # and copy it forward; the backend's storage layer then migrates it on
+    # first import.
     return any(
         (data_dir / name).exists()
-        for name in ("config.json", "users.json", "emails.json", "prompts.json")
+        for name in ("xemail.db", "config.json", "users.json", "emails.json", "prompts.json")
     )
 
 

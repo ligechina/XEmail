@@ -138,18 +138,24 @@ from app.storage import (
     delete_attachment_file,
     delete_attachments_folder,
     delete_contact,
+    delete_draft as storage_delete_draft,
+    delete_email as storage_delete_email,
     delete_experience,
     delete_fixed_rule,
     delete_prompt,
+    delete_sent as storage_delete_sent,
     delete_user,
     find_contact_by_email,
     get_account,
     get_account_sync_state,
     get_attachment_path,
     get_contact,
+    get_draft,
+    get_email,
     get_experience,
     get_fixed_rule,
     get_prompt,
+    get_sent,
     get_user,
     get_user_active_account_id,
     get_user_by_username,
@@ -157,9 +163,13 @@ from app.storage import (
     list_accounts,
     list_attachments_meta,
     list_contacts_for_account,
+    list_drafts_for_account,
+    list_emails_for_account,
     list_experiences_for_account,
     list_fixed_rules_for_account,
+    list_known_imap_uids,
     list_prompts_for_account,
+    list_sent_for_account,
     list_users,
     move_attachments_folder,
     read_drafts,
@@ -182,6 +192,10 @@ from app.storage import (
     update_fixed_rule,
     update_prompt,
     update_user,
+    upsert_draft,
+    upsert_email,
+    upsert_emails,
+    upsert_sent,
     write_drafts,
     write_desktop_settings,
     write_emails,
@@ -1207,8 +1221,7 @@ def toggle_importance_with_reason(
     """
     if payload.email_id != email_id:
         raise HTTPException(status_code=400, detail="email_id 不一致。")
-    emails = read_emails()
-    target = next((e for e in emails if e.get("id") == email_id), None)
+    target = get_email(email_id)
     if target is None:
         raise HTTPException(status_code=404, detail="邮件不存在。")
     _assert_record_belongs_to_user(target, user)
@@ -1221,7 +1234,7 @@ def toggle_importance_with_reason(
         target["handled"] = False
     else:
         target["handled"] = False
-    write_emails(emails)
+    upsert_email(target)
 
     distilled = distill_experience(
         direction="mark" if payload.mark_important else "unmark",
@@ -1280,8 +1293,7 @@ def recategorize_with_reason(
     if not new_cat:
         raise HTTPException(status_code=400, detail="分类不能为空。")
 
-    emails = read_emails()
-    target = next((e for e in emails if e.get("id") == email_id), None)
+    target = get_email(email_id)
     if target is None:
         raise HTTPException(status_code=404, detail="邮件不存在。")
     _assert_record_belongs_to_user(target, user)
@@ -1294,7 +1306,7 @@ def recategorize_with_reason(
         raise HTTPException(status_code=400, detail="邮件已在该分类中。")
 
     target["category"] = new_cat
-    write_emails(emails)
+    upsert_email(target)
 
     # Best-effort IMAP MOVE for accounts opted into folder sync — same path
     # the normal /update endpoint takes when category changes.
@@ -1358,9 +1370,7 @@ def generate_email_reply(
     user's intent and the original email's language, and return the
     generated text. The frontend splices the result into the compose
     body in place of whatever's above the「-------- 原邮件 --------」block."""
-    target = next(
-        (e for e in read_emails() if e.get("id") == email_id), None
-    )
+    target = get_email(email_id)
     if target is None:
         raise HTTPException(status_code=404, detail="邮件不存在。")
     _assert_record_belongs_to_user(target, user)
@@ -1398,9 +1408,7 @@ def get_reply_summary(
     (邮件大意 / 对方诉求) for English mail to help the user draft a reply.
     For non-English mail returns an empty summary so the frontend can
     just hide the panel — no LLM call is wasted."""
-    target = next(
-        (e for e in read_emails() if e.get("id") == email_id), None
-    )
+    target = get_email(email_id)
     if target is None:
         raise HTTPException(status_code=404, detail="邮件不存在。")
     _assert_record_belongs_to_user(target, user)
@@ -2454,10 +2462,7 @@ def send_mail(
     thread_source = None
     thread_in_reply_to = None
     if payload.reply_to_inbox_id:
-        parent = next(
-            (e for e in read_emails() if e.get("id") == payload.reply_to_inbox_id),
-            None,
-        )
+        parent = get_email(payload.reply_to_inbox_id)
         if parent:
             thread_source = parent.get("source_message_id") or parent.get(
                 "message_id"
@@ -2487,29 +2492,24 @@ def send_mail(
     # Refresh metadata from disk so the stored record matches what's on disk.
     sent_record["attachments"] = list_attachments_meta(sent_id)
 
-    sent_items = read_sent()
-    sent_items.append(sent_record)
-    write_sent(sent_items)
+    upsert_sent(sent_record)
 
     if payload.draft_id:
-        drafts = [d for d in read_drafts() if d.get("id") != payload.draft_id]
-        write_drafts(drafts)
+        storage_delete_draft(payload.draft_id)
 
     if payload.reply_to_inbox_id:
-        emails = read_emails()
-        for item in emails:
-            if item.get("id") == payload.reply_to_inbox_id:
-                item["replied"] = True
-                break
-        write_emails(emails)
+        parent_email = get_email(payload.reply_to_inbox_id)
+        if parent_email is not None:
+            parent_email["replied"] = True
+            upsert_email(parent_email)
 
     return SendResult(status="ok", detail="邮件发送成功")
 
 
 @app.get("/api/drafts", response_model=List[DraftRecord])
 def list_drafts(user: User = Depends(current_user)) -> List[DraftRecord]:
-    active_id = get_user_active_account_id(user.id)
-    items = [d for d in read_drafts() if d.get("account_id") == active_id]
+    active_id = get_user_active_account_id(user.id) or ""
+    items = list_drafts_for_account(active_id)
     items.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
     return [DraftRecord(**item) for item in items]
 
@@ -2531,21 +2531,19 @@ def save_draft(
     if not has_text and not payload.attach_from_inbox_id and not has_existing_attachments:
         raise HTTPException(status_code=400, detail="草稿内容为空，无需保存。")
 
-    drafts = read_drafts()
     now = datetime.now(timezone.utc).isoformat()
     record = None
 
     if payload.id:
-        for item in drafts:
-            if item.get("id") == payload.id:
-                item["to"] = to
-                item["cc"] = cc
-                item["bcc"] = bcc
-                item["subject"] = subject
-                item["body"] = body
-                item["updated_at"] = now
-                record = item
-                break
+        existing = get_draft(payload.id)
+        if existing is not None:
+            existing["to"] = to
+            existing["cc"] = cc
+            existing["bcc"] = bcc
+            existing["subject"] = subject
+            existing["body"] = body
+            existing["updated_at"] = now
+            record = existing
 
     if record is None:
         record = {
@@ -2558,7 +2556,6 @@ def save_draft(
             "body": body,
             "updated_at": now,
         }
-        drafts.append(record)
 
     # Carry attachments from a source inbox email if requested.
     if payload.attach_from_inbox_id:
@@ -2566,7 +2563,7 @@ def save_draft(
 
     record["attachments"] = list_attachments_meta(record["id"])
 
-    write_drafts(drafts)
+    upsert_draft(record)
     return DraftRecord(**record)
 
 
@@ -2587,12 +2584,11 @@ def _assert_record_belongs_to_user(record: Dict, user: User) -> None:
 def delete_draft(
     draft_id: str, user: User = Depends(current_user)
 ) -> Dict[str, str]:
-    drafts = read_drafts()
-    target = next((d for d in drafts if d.get("id") == draft_id), None)
+    target = get_draft(draft_id)
     if target is None:
         raise HTTPException(status_code=404, detail="草稿不存在或已删除。")
     _assert_record_belongs_to_user(target, user)
-    write_drafts([d for d in drafts if d.get("id") != draft_id])
+    storage_delete_draft(draft_id)
     delete_attachments_folder(draft_id)
     return {"status": "ok"}
 
@@ -2603,8 +2599,7 @@ async def upload_draft_attachment(
     file: UploadFile = File(...),
     user: User = Depends(current_user),
 ) -> Attachment:
-    drafts = read_drafts()
-    draft = next((d for d in drafts if d.get("id") == draft_id), None)
+    draft = get_draft(draft_id)
     if draft is None:
         raise HTTPException(status_code=404, detail="草稿不存在。")
     _assert_record_belongs_to_user(draft, user)
@@ -2624,7 +2619,7 @@ async def upload_draft_attachment(
     )
     draft["attachments"] = list_attachments_meta(draft_id)
     draft["updated_at"] = datetime.now(timezone.utc).isoformat()
-    write_drafts(drafts)
+    upsert_draft(draft)
     return Attachment(**saved)
 
 
@@ -2632,8 +2627,7 @@ async def upload_draft_attachment(
 def delete_draft_attachment(
     draft_id: str, filename: str, user: User = Depends(current_user)
 ) -> Dict[str, str]:
-    drafts = read_drafts()
-    draft = next((d for d in drafts if d.get("id") == draft_id), None)
+    draft = get_draft(draft_id)
     if draft is None:
         raise HTTPException(status_code=404, detail="草稿不存在。")
     _assert_record_belongs_to_user(draft, user)
@@ -2645,18 +2639,14 @@ def delete_draft_attachment(
         raise HTTPException(status_code=404, detail="附件不存在。")
     draft["attachments"] = list_attachments_meta(draft_id)
     draft["updated_at"] = datetime.now(timezone.utc).isoformat()
-    write_drafts(drafts)
+    upsert_draft(draft)
     return {"status": "ok"}
 
 
 def _resolve_attachment_path(record_id: str, filename: str, user: User) -> Path:
     """Common attachment lookup: locate the record (across emails/drafts/sent),
     enforce ownership, validate the path, and return a usable Path."""
-    record = (
-        next((e for e in read_emails() if e.get("id") == record_id), None)
-        or next((d for d in read_drafts() if d.get("id") == record_id), None)
-        or next((s for s in read_sent() if s.get("id") == record_id), None)
-    )
+    record = get_email(record_id) or get_draft(record_id) or get_sent(record_id)
     if record is None:
         raise HTTPException(status_code=404, detail="附件不存在。")
     _assert_record_belongs_to_user(record, user)
@@ -2839,8 +2829,8 @@ def list_sent(user: User = Depends(current_user)) -> List[SentRecord]:
     """Returns every sent record for the active account — including
     soft-deleted ones. The frontend filters by `deleted` to split
     已发送 from 回收站. Matches the /api/emails convention."""
-    active_id = get_user_active_account_id(user.id)
-    items = [s for s in read_sent() if s.get("account_id") == active_id]
+    active_id = get_user_active_account_id(user.id) or ""
+    items = list_sent_for_account(active_id)
     items.sort(key=lambda x: x.get("sent_at", ""), reverse=True)
     return [SentRecord(**item) for item in items]
 
@@ -2851,8 +2841,7 @@ def update_sent(
 ) -> SentRecord:
     """Soft-delete / restore a sent record. Sent message bodies are
     immutable, so the only field this route accepts today is `deleted`."""
-    items = read_sent()
-    target = next((s for s in items if s.get("id") == sent_id), None)
+    target = get_sent(sent_id)
     if target is None:
         raise HTTPException(status_code=404, detail="已发送邮件不存在。")
     _assert_record_belongs_to_user(target, user)
@@ -2861,7 +2850,7 @@ def update_sent(
         target["deleted_at"] = (
             datetime.now(timezone.utc).isoformat() if target["deleted"] else None
         )
-    write_sent(items)
+    upsert_sent(target)
     return SentRecord(**target)
 
 
@@ -2872,13 +2861,11 @@ def hard_delete_sent(
     """Permanently purge a sent record + its on-disk attachments. The
     regular 删除 button in 已发送 only soft-deletes; this route is the
     "彻底删除" path from 回收站."""
-    items = read_sent()
-    target = next((s for s in items if s.get("id") == sent_id), None)
+    target = get_sent(sent_id)
     if target is None:
         raise HTTPException(status_code=404, detail="已发送邮件不存在。")
     _assert_record_belongs_to_user(target, user)
-    new_items = [s for s in items if s.get("id") != sent_id]
-    write_sent(new_items)
+    storage_delete_sent(sent_id)
     delete_attachments_folder(sent_id)
     return {"status": "ok"}
 
@@ -2902,11 +2889,8 @@ def receive_mail(
     # UIDs we've already stored for this account — receive_emails uses this
     # to skip mail it would otherwise redownload + reclassify, mainly in
     # widened-window fetches (see receive_emails docstring, "Known-UID skip").
-    known_uids = {
-        str(e.get("imap_uid"))
-        for e in read_emails()
-        if e.get("account_id") == active_id and e.get("imap_uid")
-    }
+    # Indexed SQL query, no need to load body_html for every stored email.
+    known_uids = list_known_imap_uids(active_id)
 
     try:
         fetched, sync_meta = receive_emails(
@@ -2927,13 +2911,11 @@ def receive_mail(
     for item in fetched:
         item["account_id"] = active_id
 
-    all_items = read_emails()
-    own_old = [e for e in all_items if e.get("account_id") == active_id]
-    other_old = [e for e in all_items if e.get("account_id") != active_id]
+    own_old = list_emails_for_account(active_id)
     merged, stored = dedupe_by_message_id(own_old, fetched)
 
     # Materialise pending attachments under each kept record's final id, then
-    # strip the in-memory blobs so they don't leak into the on-disk JSON.
+    # strip the in-memory blobs so they don't leak into the persisted row.
     finalized: List[Dict] = []
     for rec in merged:
         pending = rec.pop("_pending_attachments", None) or []
@@ -2946,7 +2928,9 @@ def receive_mail(
             rec["attachments"] = list_attachments_meta(rec["id"])
         finalized.append(rec)
 
-    write_emails(other_old + finalized)
+    # Bulk upsert in one transaction — only this account's rows are touched;
+    # other accounts' emails are never read or rewritten.
+    upsert_emails(finalized)
     # Bump the watermark so the next click only fetches UIDs newer than this.
     if sync_meta.get("mailbox") and sync_meta.get("uidvalidity") and sync_meta.get("last_uid"):
         update_account_sync_state_entry(
@@ -2987,11 +2971,7 @@ def receive_mail_stream(
     sync_state = get_account_sync_state(active_id)
     # See /api/receive for why we collect this — saves the streaming flow
     # from re-FETCHing + re-classifying mail already in the local store.
-    known_uids = {
-        str(e.get("imap_uid"))
-        for e in read_emails()
-        if e.get("account_id") == active_id and e.get("imap_uid")
-    }
+    known_uids = list_known_imap_uids(active_id)
 
     # Inter-thread channel. receive_emails runs in a worker thread; the
     # generator (running in the request thread) drains events from this queue.
@@ -3012,18 +2992,16 @@ def receive_mail_stream(
             pass
 
     def persist_batch(batch_records: List[Dict], partial_sync_meta: Dict[str, str]) -> None:
-        """Dedupe + write + materialise attachments for ONE batch; bump the
-        watermark; enqueue a batch-saved event so the UI refreshes.
-        Reads/writes happen on the worker thread — fine, the storage layer
-        does whole-file replacement and we never overlap with another
-        receive on the same account."""
+        """Dedupe + persist + materialise attachments for ONE batch; bump
+        the watermark; enqueue a batch-saved event so the UI refreshes.
+        Runs on the worker thread — fine, the storage layer's per-record
+        upsert holds a row-level lock and we never overlap another receive
+        on the same account."""
         if not batch_records:
             return
         for item in batch_records:
             item["account_id"] = active_id
-        all_items = read_emails()
-        own_old = [e for e in all_items if e.get("account_id") == active_id]
-        other_old = [e for e in all_items if e.get("account_id") != active_id]
+        own_old = list_emails_for_account(active_id)
         merged, stored = dedupe_by_message_id(own_old, batch_records)
 
         finalized: List[Dict] = []
@@ -3038,7 +3016,7 @@ def receive_mail_stream(
                 rec["attachments"] = list_attachments_meta(rec["id"])
             finalized.append(rec)
 
-        write_emails(other_old + finalized)
+        upsert_emails(finalized)
         if (
             partial_sync_meta.get("mailbox")
             and partial_sync_meta.get("uidvalidity")
@@ -3262,8 +3240,8 @@ def list_emails(
     `category` filters to one folder; `important=true` returns only emails
     flagged as important regardless of folder (the "重要邮件" view).
     """
-    active_id = get_user_active_account_id(user.id)
-    items = [e for e in read_emails() if e.get("account_id") == active_id]
+    active_id = get_user_active_account_id(user.id) or ""
+    items = list_emails_for_account(active_id)
     if important:
         items = [item for item in items if item.get("important")]
     elif category:
@@ -3289,7 +3267,7 @@ def get_email_body(
     """Lazy-load endpoint for the heavy `body_html` field stripped from
     the /api/emails list. Returns just the two body variants; the client
     merges these into its in-memory record on demand."""
-    target = next((e for e in read_emails() if e.get("id") == email_id), None)
+    target = get_email(email_id)
     if target is None:
         raise HTTPException(status_code=404, detail="邮件不存在。")
     _assert_record_belongs_to_user(target, user)
@@ -3306,8 +3284,7 @@ def update_email(
     background: BackgroundTasks,
     user: User = Depends(current_user),
 ) -> EmailRecord:
-    emails = read_emails()
-    target = next((e for e in emails if e.get("id") == email_id), None)
+    target = get_email(email_id)
     if target is None:
         raise HTTPException(status_code=404, detail="邮件不存在。")
     _assert_record_belongs_to_user(target, user)
@@ -3355,7 +3332,7 @@ def update_email(
             target["category"] = cat
             target["_old_category"] = old_category  # used by background sync
             changed_category = True
-    write_emails(emails)
+    upsert_email(target)
 
     # Schedule best-effort IMAP sync if any tracked flag changed. The sync
     # settings come from the account that owns this email — not the active
@@ -3400,13 +3377,11 @@ def hard_delete_email(
     background: BackgroundTasks,
     user: User = Depends(current_user),
 ) -> Dict[str, str]:
-    emails = read_emails()
-    target = next((e for e in emails if e.get("id") == email_id), None)
+    target = get_email(email_id)
     if target is None:
         raise HTTPException(status_code=404, detail="邮件不存在。")
     _assert_record_belongs_to_user(target, user)
-    new_emails = [e for e in emails if e.get("id") != email_id]
-    write_emails(new_emails)
+    storage_delete_email(email_id)
     # Clean up attachments
     delete_attachments_folder(email_id)
 
