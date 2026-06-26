@@ -10330,21 +10330,35 @@
           const ok = await ensureDraftExists();
           if (!ok) return;
         }
+        let ok = 0;
+        let lastErr = "";
         for (const file of files) {
           try {
             const form = new FormData();
             form.append("file", file);
+            // credentials: "same-origin" matches every other fetch in this
+            // file — the session cookie has to ride along or the backend
+            // returns 401 and the upload silently fails. Bare fetch() works
+            // on modern WebKit (same-origin is the default since 2018) but
+            // being explicit kills a whole class of "looked like it worked"
+            // bugs across engines and pywebview versions.
             const res = await fetch(
               `/api/drafts/${encodeURIComponent(editingDraftId)}/attachments`,
-              { method: "POST", body: form }
+              { method: "POST", body: form, credentials: "same-origin" }
             );
             const data = await res.json().catch(() => ({}));
-            if (!res.ok) throw new Error(data.detail || "上传失败");
+            if (!res.ok) {
+              throw new Error(formatApiError(data) || `${file.name}: 上传失败 (HTTP ${res.status})`);
+            }
             composeAttachments.push(data);
+            ok++;
           } catch (err) {
-            setStatus(err.message, "error");
+            lastErr = (err && err.message) || "上传失败";
           }
         }
+        // Always re-render: on partial success we want the chips that did
+        // upload to appear immediately; on total failure we want the row
+        // to remain in a known state for the user to retry.
         renderComposeAttachments();
         composeInitial = {
           to: $("send_to").value,
@@ -10352,7 +10366,16 @@
           body: $("send_body").value,
         };
         await refreshAll();
-        setStatus(`已上传 ${files.length} 个附件`, "success");
+        // Status: tell the truth. Previously this unconditionally claimed
+        // success and overwrote the in-loop error, hiding 401/413/etc and
+        // leaving the user wondering "did the attachment get added?"
+        if (ok === files.length) {
+          setStatus(`已上传 ${ok} 个附件`, "success");
+        } else if (ok > 0) {
+          setStatus(`已上传 ${ok}/${files.length} 个附件 — ${lastErr}`, "error");
+        } else {
+          setStatus(lastErr || "附件上传失败", "error");
+        }
       }
 
       async function removeComposeAttachment(filename) {
