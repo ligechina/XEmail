@@ -138,8 +138,21 @@ cp "$MAC_ICON_PNG" "$MAC_TRAY_ICON_PNG"
 echo "==> [5/8] 打包 macOS pkg"
 mkdir -p "$MAC_PKG_ROOT/Applications"
 cp -R "$MAC_APP_DIR" "$MAC_PKG_ROOT/Applications/"
+
+# Emit a component plist that pins BundleIsRelocatable=false. Without this,
+# macOS Installer detects any *other* copy of XEmail.app on disk (typically
+# the one we just built under .packaging_tmp/ during a rebuild) and quietly
+# installs there instead of /Applications. The user sees the installer
+# succeed but /Applications is empty — that's what happened in build
+# 20260705_165117. Once locked, XEmail.app always lands where the pkg
+# specifies (/Applications).
+MAC_COMPONENT_PLIST="$WORK_DIR/mac/xemail-component.plist"
+pkgbuild --analyze --root "$MAC_PKG_ROOT" "$MAC_COMPONENT_PLIST" >/dev/null
+/usr/libexec/PlistBuddy -c "Set :0:BundleIsRelocatable false" "$MAC_COMPONENT_PLIST"
+
 pkgbuild \
   --root "$MAC_PKG_ROOT" \
+  --component-plist "$MAC_COMPONENT_PLIST" \
   --identifier "$MAC_APP_ID" \
   --version "$MAC_APP_VERSION" \
   --install-location "/" \

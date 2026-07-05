@@ -18,7 +18,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.request import ProxyHandler, build_opener, urlopen
+
+
+# HTTP client for probes against our own loopback backend. A dedicated
+# opener with ProxyHandler({}) — an EMPTY proxy dict — forces the request
+# to go direct, bypassing whatever the user has set as their system-wide
+# HTTP proxy in System Settings → Network → Proxies. Without this, when a
+# packet-capture or debugging tool (e.g. MacPacket, Charles, Proxyman) is
+# installed and hooks localhost, urllib silently reroutes /health calls
+# through the proxy and never reaches uvicorn — the health poll loop then
+# never returns True and the launcher never gets to webview.start(), so
+# the app dies with no window.
+_DIRECT_HTTP = build_opener(ProxyHandler({}))
 
 try:
     import fcntl
@@ -278,11 +290,17 @@ def _is_tcp_port_busy(host: str, port: int) -> bool:
 def _is_backend_healthy(base_url: str) -> bool:
     health_url = f"{base_url}/health"
     try:
-        with urlopen(health_url, timeout=1.0) as resp:
+        with _DIRECT_HTTP.open(health_url, timeout=1.0) as resp:
             return resp.status == 200
-    except URLError:
-        return False
-    except TimeoutError:
+    except Exception:
+        # We must never let a probe raise. Poll during uvicorn boot races
+        # with an in-between state where the TCP socket is accepting but
+        # the ASGI app hasn't finished importing yet — the server closes
+        # the connection and Python raises http.client.RemoteDisconnected,
+        # which is neither URLError nor TimeoutError. Same for
+        # ConnectionResetError, BrokenPipeError, and SSL negotiation
+        # errors on the odd system. Callers want a boolean "is it up?" —
+        # any exception here means "not yet".
         return False
 
 
@@ -292,7 +310,7 @@ def _running_backend_data_dir(base_url: str) -> Optional[str]:
     # whether an already-running backend can be reused after the user picks
     # a data directory in the launcher.
     try:
-        with urlopen(f"{base_url}/health", timeout=1.0) as resp:
+        with _DIRECT_HTTP.open(f"{base_url}/health", timeout=1.0) as resp:
             if resp.status != 200:
                 return None
             payload = json.loads(resp.read().decode("utf-8"))
