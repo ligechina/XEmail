@@ -1417,7 +1417,11 @@
             hint.style.color = "var(--success)";
             input.placeholder = t("已配置 · 输入新的 Key 以替换");
           } else {
-            const model = data.model || "deepseek-chat";
+            // Fallback string only shows when /api/llm-config for some reason
+            // didn't include `model` (never in normal operation, since the
+            // endpoint always echoes back _MODEL). Kept version-neutral so an
+            // API contract slip doesn't surface a stale/deprecated model name.
+            const model = data.model || "DeepSeek";
             hint.textContent = lang === "en"
               ? `Not configured. Please enter a valid DeepSeek API Key (${model}).`
               : `尚未配置。请填写一个有效的 DeepSeek API Key（${model}）。`;

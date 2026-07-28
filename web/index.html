@@ -8366,9 +8366,55 @@
       // is open. Cleared on close / submit.
       let IMPORTANCE_PENDING = null;
 
-      function toggleImportant(item) {
-        // Open the why-modal instead of flipping the flag silently. The
-        // modal's submit handler does the actual flip + experience write.
+      async function toggleImportant(item) {
+        // Merged-thread row: the "重要" flag on the row is a rollup —
+        // it's true as long as ANY member of the thread is important
+        // (see buildMergedInboxList). Piping the merged row's id into
+        // /update would only touch the representative email; the other
+        // members would keep their important=true and the thread would
+        // pop right back into 「重要」on the next render — the exact
+        // "取消重要 doesn't seem to work" symptom. Instead, apply the
+        // flip to every inbox member of the thread. No modal here: the
+        // modal asks for a single "why" to distill into one experience,
+        // and there is no coherent single reason to attach to a batch.
+        if (item && item.__merged && Array.isArray(item.__threadItems)) {
+          const targetVal = !item.important;
+          const members = item.__threadItems.filter(
+            (x) =>
+              x &&
+              x.__record_type !== "sent" &&
+              // Only touch members that actually need to change. When
+              // unmarking, that's every currently-important member; when
+              // marking, every currently-not-important one. Skips already-
+              // aligned rows so the API calls stay minimal.
+              !!x.important !== targetVal
+          );
+          if (members.length === 0) {
+            setStatus(targetVal ? t("已标记为重要") : t("已取消重要"), "success");
+            renderFolders();
+            renderList();
+            return;
+          }
+          const results = await Promise.all(
+            members.map((m) => applyEmailUpdate(m, { important: targetVal }))
+          );
+          const okCount = results.filter(Boolean).length;
+          if (okCount === 0) return; // errors already surfaced by applyEmailUpdate
+          setStatus(
+            targetVal
+              ? `已标为重要（${okCount}/${members.length} 封同源邮件）`
+              : `已取消重要（${okCount}/${members.length} 封同源邮件）`,
+            "success"
+          );
+          renderFolders();
+          renderList();
+          // Detail pane may be showing the thread — refresh it against
+          // the freshly-updated in-memory state.
+          renderDetail(item);
+          return;
+        }
+        // Single email → open the why-modal so we can record an experience.
+        // The modal's submit handler does the actual flip + experience write.
         openImportanceModal(item, !item.important);
       }
 
@@ -8638,6 +8684,37 @@
 
       async function toggleHandled(item) {
         if (!item.important || item.handled) return;
+        // Merged-thread row: same rollup trap as toggleImportant. The row
+        // shows up in 「重要」as long as any thread member is still
+        // pending (important && !handled). Touching only the representative
+        // leaves the others counted as pending — the left-sidebar
+        // 「重要」badge never decreases by more than 1 per click even if
+        // 3 emails in the thread should have moved to 「曾经重要」together.
+        // Apply the flip to every pending-important inbox member so the
+        // whole thread transitions at once.
+        if (item.__merged && Array.isArray(item.__threadItems)) {
+          const members = item.__threadItems.filter(
+            (x) =>
+              x &&
+              x.__record_type !== "sent" &&
+              !!x.important &&
+              !x.handled
+          );
+          if (members.length === 0) return;
+          const results = await Promise.all(
+            members.map((m) => applyEmailUpdate(m, { handled: true }))
+          );
+          const okCount = results.filter(Boolean).length;
+          if (okCount === 0) return;
+          setStatus(
+            `已处理（${okCount}/${members.length} 封同源邮件，已移到「曾经重要」）`,
+            "success"
+          );
+          renderFolders();
+          renderList();
+          renderDetail(item);
+          return;
+        }
         const updated = await applyEmailUpdate(item, { handled: true });
         if (!updated) return;
         setStatus("已处理，已移到「曾经重要」", "success");

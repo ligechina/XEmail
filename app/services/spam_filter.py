@@ -10,11 +10,10 @@
 
 """LLM-backed multi-folder email classifier.
 
-Calls DeepSeek's OpenAI-compatible chat-completions endpoint with the
-`deepseek-chat` model (DeepSeek V4). Designed to be fail-open: if the API
-key is missing, the call errors, or the response is unparseable, we return
-an empty category — the caller is then free to fall back (e.g. tag the
-email as 未分类).
+Calls DeepSeek's OpenAI-compatible chat-completions endpoint. Designed to
+be fail-open: if the API key is missing, the call errors, or the response
+is unparseable, we return an empty category — the caller is then free to
+fall back (e.g. tag the email as 未分类).
 """
 
 import json
@@ -28,7 +27,13 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 _ENDPOINT = "https://api.deepseek.com/v1/chat/completions"
-_MODEL = "deepseek-chat"
+# `deepseek-chat` was DeepSeek's default until they retired it in favor of
+# the v4 lineup. The old name now returns HTTP 400 with
+# "supported API model names are deepseek-v4-pro or deepseek-v4-flash".
+# `flash` is the drop-in equivalent — much cheaper per request and plenty
+# smart for the short classify / summarize / reply-draft tasks here; use
+# `deepseek-v4-pro` if you want max quality for reply drafts.
+_MODEL = "deepseek-v4-flash"
 _TIMEOUT_SEC = 15
 _DEFAULT_BODY_CHAR_CAP = 2000
 
