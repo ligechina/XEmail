@@ -26,6 +26,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+# Direct HTTP opener that ignores the system's HTTP/HTTPS proxy config.
+# Used as a fallback when the default `urllib.request.urlopen` (which
+# honors `getproxies()`) fails because the user has a debug proxy
+# installed system-wide (MacPacket, Charles, Proxyman, Fiddler…) that
+# either returns a `Tunnel connection failed: 5xx` for CONNECT requests
+# or refuses arbitrary remote endpoints. See _call_deepseek below.
+_DIRECT_HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
 _ENDPOINT = "https://api.deepseek.com/v1/chat/completions"
 # `deepseek-chat` was DeepSeek's default until they retired it in favor of
 # the v4 lineup. The old name now returns HTTP 400 with
@@ -614,6 +622,39 @@ def generate_compose_draft(
     return text
 
 
+def _post_deepseek(req: urllib.request.Request, timeout: int) -> str:
+    """POST once respecting the system HTTP proxy; on the specific class of
+    failures that indicate the proxy itself is broken (Tunnel CONNECT 5xx,
+    "Cannot connect to proxy"), retry ONCE with the direct opener.
+
+    Rationale: corporate networks legitimately require going through a
+    proxy, so we still try that first. But a common home-user footgun is
+    installing an HTTP debug tool (MacPacket, Charles, Proxyman) that
+    registers itself as the system proxy in System Settings → Network →
+    Proxies — those tools happily terminate localhost CONNECT but often
+    refuse or 5xx CONNECTs to arbitrary remote endpoints, taking out the
+    entire LLM path. The direct-fallback keeps DeepSeek reachable in that
+    scenario without breaking corporate users who need the proxy path."""
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", errors="replace")
+    except urllib.error.URLError as exc:
+        msg = str(exc).lower()
+        looks_like_proxy_failure = (
+            "tunnel connection failed" in msg
+            or "cannot connect to proxy" in msg
+            or "proxyerror" in msg
+        )
+        if not looks_like_proxy_failure:
+            raise
+        logger.warning(
+            "System HTTP proxy failed for DeepSeek call (%s); retrying direct.",
+            exc,
+        )
+        with _DIRECT_HTTP.open(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", errors="replace")
+
+
 def chat_completion(payload: dict, *, timeout: Optional[int] = None) -> str:
     """Generic DeepSeek chat-completions call. Resolves the API key from
     storage/env, posts the payload, and returns the assistant message
@@ -632,8 +673,7 @@ def chat_completion(payload: dict, *, timeout: Optional[int] = None) -> str:
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout or _TIMEOUT_SEC) as resp:
-        raw = resp.read().decode("utf-8", errors="replace")
+    raw = _post_deepseek(req, timeout or _TIMEOUT_SEC)
     data = json.loads(raw)
     content = (
         data.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
