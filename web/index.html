@@ -6785,6 +6785,50 @@
             sub.appendChild(btn);
           }
         }
+        // Re-fit to viewport now that the submenu has content. The initial
+        // positioning in openMailContextMenu measured only the main pane
+        // (submenu was empty); once the submenu flexes to its 360px cap
+        // the whole menu can spill off the bottom / right of the window,
+        // hiding the last few submenu entries (typically 未分类 / 垃圾邮件,
+        // which sit at the end of the folder tree).
+        _refitContextMenuToViewport();
+      }
+
+      function _refitContextMenuToViewport() {
+        const menu = $("mail_context_menu");
+        const sub = $("mail_context_submenu");
+        if (!menu || !menu.classList.contains("open")) return;
+        const margin = 8;
+        // Reset any prior submenu cap so the natural height is re-measured.
+        if (sub) sub.style.maxHeight = "";
+        const rect = menu.getBoundingClientRect();
+        const vh = window.innerHeight;
+        const vw = window.innerWidth;
+        // Vertical fit: nudge the whole menu upward if it clips the bottom.
+        if (rect.bottom > vh - margin) {
+          const shift = rect.bottom - (vh - margin);
+          const newTop = Math.max(margin, rect.top - shift);
+          menu.style.top = `${newTop}px`;
+        }
+        // After the top nudge, if the menu still can't fit (submenu with
+        // many folders on a short window), cap the submenu's max-height
+        // to whatever vertical space is left so its internal scrollbar
+        // takes over instead of the menu bleeding off-screen.
+        const afterRect = menu.getBoundingClientRect();
+        if (sub && afterRect.bottom > vh - margin) {
+          const overflow = afterRect.bottom - (vh - margin);
+          const currentSubHeight = sub.getBoundingClientRect().height;
+          const capped = Math.max(120, currentSubHeight - overflow);
+          sub.style.maxHeight = `${capped}px`;
+        }
+        // Horizontal fit: same idea for the right edge (submenu opens to
+        // the right of the main pane, so it's the usual overflow direction).
+        const finalRect = menu.getBoundingClientRect();
+        if (finalRect.right > vw - margin) {
+          const shift = finalRect.right - (vw - margin);
+          const newLeft = Math.max(margin, finalRect.left - shift);
+          menu.style.left = `${newLeft}px`;
+        }
       }
 
       // Builds the menu entry list for the right-clicked row. Each entry
