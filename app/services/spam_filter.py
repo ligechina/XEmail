@@ -376,6 +376,126 @@ def distill_category_experience(
     return text[:240]
 
 
+def distill_organize_experiences(
+    experiences: List[Dict[str, str]],
+) -> Dict:
+    """Ask the LLM to look over the current experience corpus and propose a
+    dedup / conflict-resolution plan. Returns a dict of shape:
+
+        {
+          "actions": [
+            {"type": "keep",  "ids": ["x_..."], "text": "…"},
+            {"type": "drop",  "ids": ["x_...", …], "reason": "冗余"},
+            {"type": "merge", "from_ids": [...], "new_text": "…"},
+          ]
+        }
+
+    Contract: every input experience id must appear in exactly one action's
+    ids / from_ids list — the plan partitions the input. On LLM failure or
+    malformed output, returns {"actions": [], "error": "..."} so the caller
+    can surface a clean error and default to no-op (never destroys data).
+
+    `experiences` items are shape {"id": "x_...", "text": "…"}.
+    """
+    if not experiences:
+        return {"actions": []}
+    # A concise numbered list gives the model stable references without
+    # letting the ids leak into the produced text.
+    lines = [f"[{e.get('id')}] {(e.get('text') or '').strip()}" for e in experiences]
+    corpus = "\n".join(lines)
+    system_msg = (
+        "你是「经验条目整理助手」。用户维护了一份用于邮件分类的经验列表,"
+        "每一条是一句自然语言指引。你的任务是分析这些条目,识别以下三类问题"
+        "并输出结构化整理方案:\n"
+        "1. 完全重复或语义高度相似 → 合并成一条更精炼的表述(merge)\n"
+        "2. 意思相反 / 存在冲突 → 保留更具体或更近期的一条,或直接删除较弱的(drop)\n"
+        "3. 被另一条完全覆盖(冗余) → 删除较宽泛的(drop)\n"
+        "其他条目一律 keep 原样。要点:\n"
+        "- 每条原始经验必须在输出里恰好出现一次(在 keep.ids / drop.ids / merge.from_ids 之一)\n"
+        "- 保持保守:拿不准就 keep。宁可留冗余,不要误删有用条目\n"
+        "- merge 后的 new_text 用一句中文,≤80 字,聚焦邮件特征"
+    )
+    user_msg = (
+        "以下是当前所有经验条目,格式为 [id] 文本:\n\n"
+        f"{corpus}\n\n"
+        "请返回严格 JSON,格式为:\n"
+        '{"actions":[{"type":"keep","ids":["x_..."],"text":"..."},'
+        '{"type":"drop","ids":["x_..."],"reason":"..."},'
+        '{"type":"merge","from_ids":["x_...","x_..."],"new_text":"..."}]}\n'
+        "只返回 JSON,不要任何前后缀或 Markdown 代码块。"
+    )
+    payload = {
+        "messages": [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_msg},
+        ],
+        "temperature": 0.1,
+        # Cap generous enough for a few dozen items × ~120 chars each.
+        "max_tokens": 4000,
+    }
+    # v4-flash / v4-pro burn a chunk of latency on internal reasoning before
+    # producing output, and this is a batch analysis over the entire corpus
+    # (not one email). The default 15s per-request timeout is way too tight;
+    # a 90s budget matches how long a "review N items and propose a plan"
+    # request actually takes in practice.
+    try:
+        raw = chat_completion(payload, timeout=90).strip()
+    except Exception as exc:
+        logger.warning("distill_organize_experiences failed: %s", exc)
+        return {"actions": [], "error": f"LLM call failed: {exc}"}
+    # Strip accidental code fences.
+    if raw.startswith("```"):
+        lines2 = raw.split("\n")
+        if lines2 and lines2[0].startswith("```"):
+            lines2 = lines2[1:]
+        if lines2 and lines2[-1].strip().startswith("```"):
+            lines2 = lines2[:-1]
+        raw = "\n".join(lines2).strip()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        logger.warning("organize plan JSON parse failed: %s | raw=%s", exc, raw[:400])
+        return {"actions": [], "error": "LLM 返回的不是合法 JSON"}
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("actions"), list):
+        return {"actions": [], "error": "LLM 返回的 JSON 缺少 actions 数组"}
+    # Server-side sanity: every input id must appear exactly once across
+    # the plan. If the LLM missed some, silently keep them so no data is
+    # lost. If the LLM invented ids, drop those actions.
+    input_ids = {str(e["id"]) for e in experiences if e.get("id")}
+    seen: set = set()
+    cleaned = []
+    for a in parsed["actions"]:
+        if not isinstance(a, dict):
+            continue
+        t = a.get("type")
+        if t == "keep":
+            ids = [i for i in (a.get("ids") or []) if isinstance(i, str) and i in input_ids and i not in seen]
+            for i in ids:
+                seen.add(i)
+            if ids:
+                cleaned.append({"type": "keep", "ids": ids, "text": a.get("text") or ""})
+        elif t == "drop":
+            ids = [i for i in (a.get("ids") or []) if isinstance(i, str) and i in input_ids and i not in seen]
+            for i in ids:
+                seen.add(i)
+            if ids:
+                cleaned.append({"type": "drop", "ids": ids, "reason": (a.get("reason") or "").strip()})
+        elif t == "merge":
+            from_ids = [i for i in (a.get("from_ids") or []) if isinstance(i, str) and i in input_ids and i not in seen]
+            new_text = (a.get("new_text") or "").strip()
+            if len(from_ids) >= 2 and new_text:
+                for i in from_ids:
+                    seen.add(i)
+                cleaned.append({"type": "merge", "from_ids": from_ids, "new_text": new_text[:240]})
+    # Any id the LLM forgot → implicit keep so we never lose it.
+    forgotten = [i for i in input_ids if i not in seen]
+    if forgotten:
+        by_id = {str(e["id"]): (e.get("text") or "") for e in experiences}
+        cleaned.append({"type": "keep", "ids": forgotten, "text": ""})
+        # Attach individual texts as note for the modal
+    return {"actions": cleaned}
+
+
 def generate_reply(
     *,
     original_from: str,

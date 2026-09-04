@@ -70,8 +70,8 @@ def classify_email_record(
     system_prompt: Optional[str] = None,
     user_prompts_with_targets: Optional[List[Dict]] = None,
     field_config: Optional[Dict] = None,
-) -> Tuple[str, bool, str]:
-    """Per-email classification pipeline. Returns (category, important, reason).
+) -> Tuple[str, bool, str, Dict]:
+    """Per-email classification pipeline. Returns (category, important, reason, trace).
 
     Order: fixed rules (first match wins) → LLM → 未分类 sentinel. Reusable
     by both the receive flow and the manual "智能分类" retry endpoint.
@@ -80,7 +80,16 @@ def classify_email_record(
     flagged as 重要. Fixed rules never set it (they only route a folder);
     callers should treat False as "no opinion" when no LLM verdict was
     produced — see receive_emails / classify_unsorted / reclassify_all_stream.
+
+    `trace` is a machine-readable record of what happened during this call
+    (which stage produced the verdict, which rule matched, which prompts
+    were in scope, LLM reason). Callers should append it to the email's
+    `classification_trace` list so the admin 分类历史 page can replay it.
     """
+    import time as _t
+
+    _ts = _t.strftime("%Y-%m-%dT%H:%M:%S", _t.gmtime()) + "Z"
+
     # 1) Programmatic fixed rules. Rules with target "*" ("全部") are not
     # routing rules — they match across all folders so they can't pick a
     # destination. We let those fall through to the LLM step instead of
@@ -100,12 +109,28 @@ def classify_email_record(
                 nl_excerpt = (rule.get("nl_text") or "").strip().replace("\n", " ")
                 if len(nl_excerpt) > 40:
                     nl_excerpt = nl_excerpt[:40] + "…"
-                return target, False, f"固定规则命中: {nl_excerpt or rule.get('id')}"
+                # Honor the rule's `mark_important` flag. Historically rule-
+                # hits could never set important because they short-circuit
+                # the LLM (which is the only other producer of that flag);
+                # this checkbox lets a rule express "route AND flag" in one
+                # place, avoiding the workaround of writing a prompt/experience
+                # for the same sender.
+                mark_important = bool(rule.get("mark_important"))
+                trace = {
+                    "ts": _ts,
+                    "stage": "fixed_rule",
+                    "matched_rule_id": rule.get("id") or "",
+                    "matched_rule_name": rule.get("name") or "",
+                    "matched_rule_nl": (rule.get("nl_text") or "").strip(),
+                    "matched_rule_target": target,
+                    "matched_rule_mark_important": mark_important,
+                    "final_category": target,
+                    "final_important": mark_important,
+                    "reason": f"固定规则命中: {nl_excerpt or rule.get('id')}",
+                }
+                return target, mark_important, trace["reason"], trace
 
-    # 2) LLM (only if user prompts exist or system prompt is configured —
-    # otherwise we'd waste a call doing nothing useful; but the LLM is also
-    # what gives spam detection out of the box, so we always try when
-    # available_folders is populated).
+    # 2) LLM
     cat, important, reason = classify_via_llm(
         from_email,
         subject,
@@ -117,14 +142,50 @@ def classify_email_record(
         available_folders=available_folders,
         field_config=field_config,
     )
-    if cat and (not available_folders or cat in available_folders):
-        return cat, important, reason
+    # For the trace, snapshot each prompt/experience that was in scope for
+    # this LLM call. `_kind` / `_id` come from _classification_context in
+    # main.py; we honestly can't attribute the LLM's decision to any single
+    # one of them (that's what the "shown" list is meant to convey — these
+    # were all in the prompt window).
+    prompts_shown: List[Dict] = []
+    experiences_shown: List[Dict] = []
+    fixed_rule_general: List[Dict] = []
+    for item in user_prompts_with_targets or []:
+        kind = item.get("_kind")
+        entry = {"id": item.get("_id") or "", "text": item.get("text") or "",
+                 "target_folder": item.get("target_folder")}
+        if kind == "experience":
+            experiences_shown.append(entry)
+        elif kind == "fixed_rule_general":
+            fixed_rule_general.append(entry)
+        else:
+            prompts_shown.append(entry)
 
-    # 3) Tombstone for unsorted emails. Reason carries forward whatever
-    # context we have (e.g. "no api key", "llm error: ...") to aid debugging.
-    # Even on unclassified, an LLM-reported important=true survives — the
-    # user told us to flag it regardless of which folder it ends up in.
-    return UNCLASSIFIED, important, reason or "未命中固定规则且 LLM 无有效分类"
+    llm_produced = bool(cat)
+    used_cat = cat if (cat and (not available_folders or cat in available_folders)) else ""
+    final_cat = used_cat or UNCLASSIFIED
+    final_reason = reason if used_cat else (reason or "未命中固定规则且 LLM 无有效分类")
+    trace = {
+        "ts": _ts,
+        "stage": "llm" if llm_produced else "fallback",
+        "system_prompt_used": "admin-override" if system_prompt else "default",
+        "prompts_shown": prompts_shown,
+        "experiences_shown": experiences_shown,
+        "fixed_rule_general_shown": fixed_rule_general,
+        "available_folders": list(available_folders or []),
+        "llm_raw_category": cat,        # what the LLM literally output
+        "llm_reason": reason,
+        "llm_important": bool(important),
+        "final_category": final_cat,
+        "final_important": bool(important),
+        "reason": final_reason,
+    }
+    if used_cat:
+        return used_cat, important, reason, trace
+    # 3) Tombstone: LLM didn't produce a usable category → 未分类. Preserve
+    # important=True if the LLM asserted it (user told us to flag regardless
+    # of which folder it ends up in).
+    return UNCLASSIFIED, important, final_reason, trace
 
 
 def _split_address_header(raw: str) -> List[str]:
@@ -557,7 +618,7 @@ def receive_emails(
                 # Two-stage classification: programmatic fixed rules first, then
                 # the LLM. Anything still unsorted gets the 未分类 tombstone so
                 # the user can retry with the «智能分类» button later.
-                category, important, classification_reason = classify_email_record(
+                category, important, classification_reason, classification_trace = classify_email_record(
                     from_email=from_email,
                     to_email=to_email,
                     cc_email=cc_email,
@@ -593,6 +654,7 @@ def receive_emails(
                     "imap_uid": uid_str,
                     "imap_mailbox": selected_mailbox,
                     "spam_reason": classification_reason,
+                    "classification_trace": [classification_trace],
                     "_pending_attachments": pending_attachments,
                 }
                 records.append(new_record)

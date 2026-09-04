@@ -347,6 +347,55 @@
         </table>
       </div>
 
+      <div class="card">
+        <h2>分类历史</h2>
+        <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px;">
+          每封邮件被分类(收信、智能分类、重新分类)时都会记下一条 trace。这里可以按最近顺序浏览,追查某封邮件"为什么落到这个分类"。仅记录最近 20 条 trace / 每封邮件。
+        </p>
+        <div class="mode-row" style="margin-bottom:8px;gap:8px;flex-wrap:wrap">
+          <select id="ch_stage_filter" style="padding:4px 8px">
+            <option value="">全部阶段</option>
+            <option value="fixed_rule">固定规则命中</option>
+            <option value="llm">LLM 判定</option>
+            <option value="fallback">未分类兜底</option>
+          </select>
+          <button id="btn_ch_refresh" class="btn" type="button">刷新</button>
+          <span id="ch_summary" class="mode-hint" style="align-self:center"></span>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th style="width:140px">时间</th>
+              <th style="width:80px">阶段</th>
+              <th>主题</th>
+              <th style="width:220px">发件人</th>
+              <th style="width:120px">最终分类</th>
+              <th style="width:60px">重要</th>
+              <th style="width:80px">操作</th>
+            </tr>
+          </thead>
+          <tbody id="ch_list_body"></tbody>
+        </table>
+        <div class="mode-row" style="margin-top:8px;justify-content:space-between">
+          <div id="ch_pager" class="mode-hint"></div>
+          <div>
+            <button id="btn_ch_prev" class="btn" type="button" disabled>← 上一页</button>
+            <button id="btn_ch_next" class="btn" type="button" disabled>下一页 →</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Detail modal: expanded trace for one email. Populated on demand -->
+      <div id="ch_detail_backdrop" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:2000;align-items:center;justify-content:center">
+        <div style="background:var(--surface);border-radius:8px;max-width:820px;width:92%;max-height:85vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.35)">
+          <div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+            <h3 style="margin:0;font-size:15px" id="ch_detail_title">分类历史详情</h3>
+            <button class="btn" type="button" onclick="closeChDetail()">关闭</button>
+          </div>
+          <div id="ch_detail_body" style="padding:14px 18px;overflow-y:auto;flex:1;font-size:13px"></div>
+        </div>
+      </div>
+
       <div class="status" id="status"></div>
     </main>
 
@@ -800,8 +849,177 @@
         }
       });
 
+      // ── Classification history browser ────────────────────────────
+      // Wired to the two /api/admin/classification-history endpoints. The
+      // list view is paginated (100 rows / page); clicking a row opens
+      // the detail modal with the email's full trace timeline.
+      let CH_OFFSET = 0;
+      const CH_PAGE_SIZE = 100;
+
+      function _fmtTs(ts) {
+        if (!ts) return "";
+        // Trace timestamps are ISO-ish "YYYY-MM-DDTHH:MM:SSZ". Trim the
+        // second-of-day and trailing Z for a compact tabular display.
+        return ts.replace("T", " ").replace(/Z$/, "").slice(0, 16);
+      }
+      function _stageLabel(s) {
+        return {
+          "fixed_rule": "🎯 固定规则",
+          "llm": "🧠 LLM",
+          "fallback": "❓ 未分类",
+        }[s] || (s || "");
+      }
+      function _escape(s) {
+        return String(s == null ? "" : s)
+          .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
+      }
+
+      async function loadClassificationHistory() {
+        const stage = ($("ch_stage_filter") && $("ch_stage_filter").value) || "";
+        const params = new URLSearchParams({
+          limit: String(CH_PAGE_SIZE),
+          offset: String(CH_OFFSET),
+        });
+        if (stage) params.set("stage", stage);
+        try {
+          const res = await api(`/api/admin/classification-history?${params}`);
+          renderClassificationHistoryList(res);
+        } catch (err) {
+          $("ch_list_body").innerHTML =
+            `<tr><td colspan="7" style="color:var(--danger);padding:12px">加载失败: ${_escape(err.message)}</td></tr>`;
+        }
+      }
+
+      function renderClassificationHistoryList(res) {
+        const items = (res && res.items) || [];
+        const total = (res && res.total) || 0;
+        const body = $("ch_list_body");
+        if (!items.length) {
+          body.innerHTML = `<tr><td colspan="7" style="color:var(--text-muted);padding:12px">没有匹配的分类记录。</td></tr>`;
+        } else {
+          body.innerHTML = items.map((it) => `
+            <tr style="border-top:1px solid var(--border)">
+              <td style="font-size:12px;color:var(--text-muted)">${_escape(_fmtTs(it.last_trace_ts))}</td>
+              <td style="font-size:12px">${_escape(_stageLabel(it.last_trace_stage))}</td>
+              <td style="font-size:13px" title="${_escape(it.last_trace_reason)}">${_escape(it.subject || "(无主题)")}</td>
+              <td style="font-size:12px;color:var(--text-muted)">${_escape(it.from_email)}</td>
+              <td style="font-size:12px">${_escape(it.final_category)}</td>
+              <td style="text-align:center">${it.final_important ? "⭐" : ""}</td>
+              <td><button class="btn" type="button" onclick="showChDetail('${_escape(it.email_id)}')">查看 (${it.trace_count})</button></td>
+            </tr>
+          `).join("");
+        }
+        const pageStart = total === 0 ? 0 : CH_OFFSET + 1;
+        const pageEnd = Math.min(CH_OFFSET + items.length, total);
+        $("ch_summary").textContent = total > 0
+          ? `共 ${total} 条`
+          : "";
+        $("ch_pager").textContent = total > 0
+          ? `第 ${pageStart}-${pageEnd} 条 / 共 ${total} 条`
+          : "";
+        $("btn_ch_prev").disabled = CH_OFFSET <= 0;
+        $("btn_ch_next").disabled = CH_OFFSET + CH_PAGE_SIZE >= total;
+      }
+
+      async function showChDetail(emailId) {
+        const backdrop = $("ch_detail_backdrop");
+        const bodyEl = $("ch_detail_body");
+        const titleEl = $("ch_detail_title");
+        bodyEl.innerHTML = "<em>加载中…</em>";
+        titleEl.textContent = "分类历史详情";
+        backdrop.style.display = "flex";
+        try {
+          const d = await api(`/api/admin/classification-history/${encodeURIComponent(emailId)}`);
+          titleEl.textContent = d.subject ? `分类历史：${d.subject.slice(0, 60)}` : "分类历史详情";
+          bodyEl.innerHTML = renderChDetailContent(d);
+        } catch (err) {
+          bodyEl.innerHTML = `<div style="color:var(--danger)">加载失败: ${_escape(err.message)}</div>`;
+        }
+      }
+
+      function renderChDetailContent(d) {
+        const header = `
+          <div style="background:var(--surface-muted);padding:10px;border-radius:6px;margin-bottom:12px;font-size:12px">
+            <div><strong>发件人:</strong> ${_escape(d.from_email)}</div>
+            <div><strong>收件人:</strong> ${_escape(d.to_email)}</div>
+            <div><strong>收到时间:</strong> ${_escape(d.received_at)}</div>
+            <div><strong>当前分类:</strong> ${_escape(d.final_category)} ${d.final_important ? "⭐" : ""}</div>
+            <div><strong>账号:</strong> ${_escape(d.account_id)}</div>
+          </div>
+        `;
+        const traces = d.traces || [];
+        if (!traces.length) return header + "<div style='color:var(--text-muted)'>无 trace 记录。</div>";
+        // Newest first so the most-recent decision is at the top.
+        const items = traces.slice().reverse().map((t, revIdx) => {
+          const isLatest = revIdx === 0;
+          const stageLabel = _stageLabel(t.stage);
+          let body = "";
+          if (t.stage === "fixed_rule") {
+            body = `
+              <div><strong>命中规则:</strong> ${_escape(t.matched_rule_name || "(未命名)")} <span style="color:var(--text-muted)">#${_escape(t.matched_rule_id || "")}</span></div>
+              <div style="margin-top:4px"><strong>规则文本:</strong> ${_escape(t.matched_rule_nl)}</div>
+              <div style="margin-top:4px"><strong>→ 目标:</strong> ${_escape(t.matched_rule_target)} ${t.matched_rule_mark_important ? "⭐ 同时标为重要" : ""}</div>
+              <div style="color:var(--text-muted);font-size:11px;margin-top:6px">说明:未走 LLM,直接短路。</div>
+            `;
+          } else {
+            const rows = (t.prompts_shown || []).map((p) =>
+              `<li>[提示 <code>${_escape(p.id)}</code>] ${_escape(p.text)}${p.target_folder ? ` <span style="color:var(--text-subtle)">→ ${_escape(p.target_folder)}</span>` : ""}</li>`
+            );
+            const rowsExp = (t.experiences_shown || []).map((p) =>
+              `<li>[经验 <code>${_escape(p.id)}</code>] ${_escape(p.text)}</li>`
+            );
+            const rowsGeneral = (t.fixed_rule_general_shown || []).map((p) =>
+              `<li>[通用规则 <code>${_escape(p.id)}</code>] ${_escape(p.text)}</li>`
+            );
+            body = `
+              <div><strong>系统提示:</strong> ${_escape(t.system_prompt_used || "default")}</div>
+              <div style="margin-top:4px"><strong>LLM 原始输出分类:</strong> ${_escape(t.llm_raw_category || "(空)")}</div>
+              <div><strong>LLM 理由:</strong> ${_escape(t.llm_reason || "(空)")}</div>
+              <div><strong>LLM 说重要?</strong> ${t.llm_important ? "是" : "否"}</div>
+              <div style="margin-top:6px"><strong>可选文件夹:</strong> ${_escape((t.available_folders || []).join(" / "))}</div>
+              ${rows.length ? `<div style="margin-top:6px"><strong>送入 LLM 的提示 (${rows.length}):</strong><ul style="margin:4px 0 0 18px;padding:0">${rows.join("")}</ul></div>` : ""}
+              ${rowsExp.length ? `<div style="margin-top:6px"><strong>送入 LLM 的经验 (${rowsExp.length}):</strong><ul style="margin:4px 0 0 18px;padding:0">${rowsExp.join("")}</ul></div>` : ""}
+              ${rowsGeneral.length ? `<div style="margin-top:6px"><strong>送入 LLM 的通用规则 (${rowsGeneral.length}):</strong><ul style="margin:4px 0 0 18px;padding:0">${rowsGeneral.join("")}</ul></div>` : ""}
+              <div style="color:var(--text-muted);font-size:11px;margin-top:6px">说明:LLM 决策是隐式加权,无法归因到某一条具体规则/经验;上表是本次调用送入 LLM 的全部候选。</div>
+            `;
+          }
+          return `
+            <div style="border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:10px;${isLatest ? "border-color:var(--primary);background:rgba(37,99,235,0.03)" : ""}">
+              <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:6px">
+                <span><strong>${_escape(stageLabel)}</strong> ${isLatest ? '<span style="color:var(--primary);font-size:11px">(最新)</span>' : ""}</span>
+                <span style="color:var(--text-muted)">${_escape(_fmtTs(t.ts))}</span>
+              </div>
+              <div><strong>最终:</strong> ${_escape(t.final_category)} ${t.final_important ? "⭐" : ""} <span style="color:var(--text-muted)">— ${_escape(t.reason)}</span></div>
+              <div style="margin-top:8px">${body}</div>
+            </div>
+          `;
+        }).join("");
+        return header + items;
+      }
+
+      function closeChDetail() {
+        $("ch_detail_backdrop").style.display = "none";
+      }
+
+      $("btn_ch_refresh").addEventListener("click", () => { CH_OFFSET = 0; loadClassificationHistory(); });
+      $("ch_stage_filter").addEventListener("change", () => { CH_OFFSET = 0; loadClassificationHistory(); });
+      $("btn_ch_prev").addEventListener("click", () => {
+        CH_OFFSET = Math.max(0, CH_OFFSET - CH_PAGE_SIZE);
+        loadClassificationHistory();
+      });
+      $("btn_ch_next").addEventListener("click", () => {
+        CH_OFFSET += CH_PAGE_SIZE;
+        loadClassificationHistory();
+      });
+      $("ch_detail_backdrop").addEventListener("click", (e) => {
+        if (e.target === $("ch_detail_backdrop")) closeChDetail();
+      });
+
       loadBuildVersion();
       bootstrap();
+      // Load history on page open too — bootstrap doesn't fetch it.
+      loadClassificationHistory();
     </script>
   </body>
 </html>

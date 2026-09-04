@@ -318,6 +318,26 @@ class ExperienceUpdate(BaseModel):
     text: str = Field(..., min_length=1, max_length=1000)
 
 
+class ExperienceOrganizeAction(BaseModel):
+    """One entry in an organize plan. `type` picks the interpretation:
+
+    - keep:  ids stay unchanged
+    - drop:  ids get deleted
+    - merge: from_ids get deleted, a new experience with new_text is added
+    """
+    type: str  # "keep" | "drop" | "merge"
+    ids: List[str] = Field(default_factory=list)         # keep / drop
+    from_ids: List[str] = Field(default_factory=list)    # merge
+    text: str = ""                                        # keep (informational echo)
+    reason: str = ""                                      # drop
+    new_text: str = ""                                    # merge
+
+
+class ExperienceOrganizePlan(BaseModel):
+    actions: List[ExperienceOrganizeAction] = Field(default_factory=list)
+    error: Optional[str] = None                           # LLM/parse failure surfaced to UI
+
+
 class ComposeDraftRequest(BaseModel):
     """Compose-window「自动生成」payload — same shape as a reply intent
     but no original email is referenced. The signature comes from the
@@ -468,6 +488,11 @@ class FixedRule(BaseModel):
     code_preview: str = ""
     refs: List[str] = Field(default_factory=list)  # denormalized @name dependencies
     target_folder: str
+    # When True, an email matching this rule is ALSO flagged as important.
+    # Fixed rules short-circuit LLM classification, so without this the
+    # important flag would never get set on rule-hits. Default False keeps
+    # legacy rules behaving exactly as before.
+    mark_important: bool = False
     created_at: str
     updated_at: Optional[str] = None
 
@@ -482,6 +507,7 @@ class FixedRuleCompileRequest(BaseModel):
     target_folder: str = Field(..., min_length=1, max_length=128)
     name: str = Field(default="", max_length=48)
     editing_id: Optional[str] = None
+    mark_important: bool = False  # forwarded to preview so the confirm step keeps it
 
 
 class FixedRuleCompileResponse(BaseModel):
@@ -493,6 +519,7 @@ class FixedRuleCompileResponse(BaseModel):
     name: str = ""
     expanded_nl: str = ""           # NL after @ref substitution, for transparency
     refs: List[str] = Field(default_factory=list)
+    mark_important: bool = False    # echoed back so the confirm step can display it
 
 
 class FixedRuleValidateRequest(BaseModel):
@@ -520,6 +547,7 @@ class FixedRuleCreate(BaseModel):
     program: Dict
     refs: List[str] = Field(default_factory=list)
     target_folder: str = Field(..., min_length=1, max_length=128)
+    mark_important: bool = False
 
 
 class FixedRuleUpdate(BaseModel):
@@ -530,6 +558,7 @@ class FixedRuleUpdate(BaseModel):
     program: Optional[Dict] = None
     refs: Optional[List[str]] = None
     target_folder: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    mark_important: Optional[bool] = None
 
 
 class FixedRuleReorder(BaseModel):

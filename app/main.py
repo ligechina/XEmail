@@ -53,6 +53,8 @@ from app.models import (
     DesktopSettingsUpdate,
     Experience,
     ExperienceCreate,
+    ExperienceOrganizeAction,
+    ExperienceOrganizePlan,
     ExperienceUpdate,
     ImportanceToggleRequest,
     ImportanceToggleResult,
@@ -783,6 +785,100 @@ def shutdown_server(_: User = Depends(require_admin)) -> Dict[str, str]:
     return {"status": "shutting_down"}
 
 
+# ── Admin: classification history ─────────────────────────────────────
+# Every classify_email_record call appends one entry to the target
+# email's `classification_trace` list. These two endpoints let an admin
+# browse that history across all accounts so misclassifications can be
+# investigated ("why did this land in 未分类?" — check the last trace).
+
+
+@app.get("/api/admin/classification-history")
+def admin_list_classification_history(
+    account_id: str = Query(default=""),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    stage: str = Query(default=""),           # "" | "fixed_rule" | "llm" | "fallback"
+    _: User = Depends(require_admin),
+) -> Dict[str, Any]:
+    """Paginated list of emails with at least one classification-trace entry.
+    Newest-classified-first, cross-account by default.
+
+    Response shape (kept flat so the UI can render a table without extra
+    fetches):
+        {
+          "total": <int>,     # count matching the current filter
+          "items": [{
+            "email_id": ..., "account_id": ..., "subject": ...,
+            "from_email": ..., "received_at": ...,
+            "final_category": ..., "final_important": ...,
+            "last_trace_ts": ..., "last_trace_stage": ...,
+            "last_trace_reason": ..., "trace_count": <int>
+          }]
+        }"""
+    # Load all emails once. For very large mailboxes this is fine — read
+    # returns a python list; the trace field lives inside data_json.
+    if account_id:
+        all_emails = list_emails_for_account(account_id)
+    else:
+        all_emails = read_emails()
+
+    # Filter to those that actually have a trace. Sort newest-first by the
+    # latest trace timestamp so freshly-classified mail shows up on top.
+    matched: List[Dict] = []
+    for e in all_emails:
+        traces = e.get("classification_trace") or []
+        if not traces:
+            continue
+        last = traces[-1] if isinstance(traces[-1], dict) else {}
+        if stage and last.get("stage") != stage:
+            continue
+        matched.append((e, traces, last))
+    matched.sort(key=lambda t: (t[2].get("ts") or ""), reverse=True)
+    total = len(matched)
+    page = matched[offset : offset + limit]
+
+    items = []
+    for e, traces, last in page:
+        items.append({
+            "email_id": e.get("id") or "",
+            "account_id": e.get("account_id") or "",
+            "subject": (e.get("subject") or "")[:200],
+            "from_email": e.get("from_email") or "",
+            "received_at": e.get("received_at") or "",
+            "final_category": e.get("category") or "",
+            "final_important": bool(e.get("important")),
+            "last_trace_ts": last.get("ts") or "",
+            "last_trace_stage": last.get("stage") or "",
+            "last_trace_reason": last.get("reason") or "",
+            "trace_count": len(traces),
+        })
+    return {"total": total, "items": items}
+
+
+@app.get("/api/admin/classification-history/{email_id}")
+def admin_get_classification_history(
+    email_id: str,
+    _: User = Depends(require_admin),
+) -> Dict[str, Any]:
+    """Full trace history for one email — every entry in the order it was
+    appended (oldest → newest). Includes email metadata so the admin page
+    doesn't need a second /api/emails/{id} fetch."""
+    e = get_email(email_id)
+    if not e:
+        raise HTTPException(status_code=404, detail="邮件不存在。")
+    return {
+        "email_id": e.get("id") or "",
+        "account_id": e.get("account_id") or "",
+        "subject": e.get("subject") or "",
+        "from_email": e.get("from_email") or "",
+        "to_email": e.get("to_email") or "",
+        "received_at": e.get("received_at") or "",
+        "final_category": e.get("category") or "",
+        "final_important": bool(e.get("important")),
+        "traces": e.get("classification_trace") or [],
+    }
+
+
 # -------- spam classification prompts --------
 
 def _decorate_prompt(p: Dict) -> UserPrompt:
@@ -1201,6 +1297,101 @@ def remove_experience(
     return {"status": "ok"}
 
 
+# ── Experience one-click organize: dedup + conflict resolution via LLM. ──
+# Two-step so the user always sees what will change before it happens:
+#   POST /api/experiences/organize/preview  → returns the plan, no mutation
+#   POST /api/experiences/organize/apply    → takes the plan back and executes
+# The apply step re-validates every id against the current account so the
+# preview can't be replayed against a different account or against experiences
+# that have since been deleted / added.
+
+@app.post(
+    "/api/experiences/organize/preview",
+    response_model=ExperienceOrganizePlan,
+)
+def preview_organize_experiences(
+    user: User = Depends(current_user),
+) -> ExperienceOrganizePlan:
+    active_id = _active_account_id_for(user)
+    experiences = list_experiences_for_account(active_id)
+    if len(experiences) < 2:
+        return ExperienceOrganizePlan(actions=[])
+    from app.services.spam_filter import distill_organize_experiences
+
+    plan = distill_organize_experiences(
+        [{"id": e.get("id") or "", "text": e.get("text") or ""} for e in experiences]
+    )
+    return ExperienceOrganizePlan(**plan)
+
+
+@app.post(
+    "/api/experiences/organize/apply",
+    response_model=Dict[str, Any],
+)
+def apply_organize_experiences(
+    plan: ExperienceOrganizePlan,
+    user: User = Depends(current_user),
+) -> Dict[str, Any]:
+    active_id = _active_account_id_for(user)
+    existing_by_id = {
+        e["id"]: e for e in list_experiences_for_account(active_id) if e.get("id")
+    }
+    ids_to_delete: List[str] = []
+    texts_to_add: List[str] = []
+    for action in plan.actions:
+        if action.type == "drop":
+            for eid in action.ids:
+                if eid not in existing_by_id:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"经验 {eid} 已不存在(可能被其他会话修改),请重新整理。",
+                    )
+                ids_to_delete.append(eid)
+        elif action.type == "merge":
+            if len(action.from_ids) < 2 or not action.new_text.strip():
+                continue
+            for eid in action.from_ids:
+                if eid not in existing_by_id:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"经验 {eid} 已不存在(可能被其他会话修改),请重新整理。",
+                    )
+                ids_to_delete.append(eid)
+            texts_to_add.append(action.new_text.strip()[:240])
+        # keep: no-op
+
+    # Execute: delete first (frees name/slug room in case of any conflict),
+    # then insert merged replacements.
+    for eid in ids_to_delete:
+        try:
+            delete_experience(eid)
+        except Exception:  # noqa: BLE001
+            # A concurrent delete would have raised 400 above; anything else
+            # is unusual — log and continue so the rest of the plan applies.
+            logger.warning("organize/apply: failed to delete %s", eid)
+    added_ids: List[str] = []
+    for text in texts_to_add:
+        rec = add_experience(
+            {
+                "account_id": active_id,
+                "user_id": user.id,
+                "text": text,
+                "source": "organize",
+                "source_email_id": None,
+                "created_at": _now_iso(),
+                "updated_at": None,
+            }
+        )
+        if isinstance(rec, dict) and rec.get("id"):
+            added_ids.append(rec["id"])
+    return {
+        "status": "ok",
+        "deleted": len(ids_to_delete),
+        "merged_into": len(added_ids),
+        "added_ids": added_ids,
+    }
+
+
 @app.post(
     "/api/emails/{email_id}/importance-with-reason",
     response_model=ImportanceToggleResult,
@@ -1507,6 +1698,7 @@ def compile_fixed_rule(
         name=payload.name.strip(),
         expanded_nl=result["expanded_nl"],
         refs=result["refs"],
+        mark_important=bool(payload.mark_important),
     )
 
 
@@ -1573,6 +1765,7 @@ def create_fixed_rule(
             "program": payload.program,
             "refs": refs,
             "target_folder": target_folder,
+            "mark_important": bool(payload.mark_important),
             "created_at": _now_iso(),
             "updated_at": None,
         }
@@ -1626,6 +1819,8 @@ def edit_fixed_rule(
             existing.get("account_id") or "",
             required=True,
         )
+    if payload.mark_important is not None:
+        fields["mark_important"] = bool(payload.mark_important)
 
     # Cycle / missing-ref re-check against current account state.
     lookup = _build_name_lookup(
@@ -1676,16 +1871,50 @@ def remove_fixed_rule(
 
 # -------- reclassify "未分类" emails on demand --------
 
+# Max classification-trace entries kept per email. Every re-classify
+# (manual retry, 重新分类, receive-then-recategorize) appends one entry;
+# without a cap a heavily re-run email would grow its data_json blob
+# forever. 20 is plenty to see recent history and pattern shifts.
+_TRACE_MAX_PER_EMAIL = 20
+
+
+def _append_classification_trace(record: Dict, trace: Optional[Dict]) -> None:
+    """Push one trace entry onto the email record's history (in-place),
+    trimming to the most recent _TRACE_MAX_PER_EMAIL entries. Called by
+    every code path that runs classify_email_record so the admin 分类历史
+    page has a complete audit trail."""
+    if not isinstance(trace, dict):
+        return
+    hist = record.get("classification_trace")
+    if not isinstance(hist, list):
+        hist = []
+    hist.append(trace)
+    if len(hist) > _TRACE_MAX_PER_EMAIL:
+        hist = hist[-_TRACE_MAX_PER_EMAIL:]
+    record["classification_trace"] = hist
+
+
 def _classification_context(account_id: str) -> Dict:
     """Bundle every piece of state the classifier needs for one account.
 
     Fixed rules whose target is the "全部" sentinel (`*`) are forwarded to
     the LLM as extra general guidance, since they have no folder to route
     to. Their AST still runs at the fixed-rule stage, but it can never
-    return early — see classify_email_record."""
+    return early — see classify_email_record.
+
+    Each entry in `user_prompts_with_targets` carries `_kind` + `_id`
+    sidecar fields so the classification-history trace can attribute
+    which prompts / experiences / target-less-rules were in scope for a
+    given LLM call. _compose_system_prompt only reads .text / .target_folder,
+    so the extra keys are ignored by the LLM prompt-building path."""
     fixed_rules = list_fixed_rules_for_account(account_id)
     user_prompts: List[Dict] = [
-        {"text": p.get("text") or "", "target_folder": p.get("target_folder")}
+        {
+            "text": p.get("text") or "",
+            "target_folder": p.get("target_folder"),
+            "_kind": "prompt",
+            "_id": p.get("id") or "",
+        }
         for p in list_prompts_for_account(account_id)
         if (p.get("text") or "").strip()
     ]
@@ -1693,14 +1922,24 @@ def _classification_context(account_id: str) -> Dict:
         if (rule.get("target_folder") or "").strip() == ALL_FOLDERS_SENTINEL:
             nl = (rule.get("nl_text") or "").strip()
             if nl:
-                user_prompts.append({"text": nl, "target_folder": None})
+                user_prompts.append({
+                    "text": nl,
+                    "target_folder": None,
+                    "_kind": "fixed_rule_general",
+                    "_id": rule.get("id") or "",
+                })
     # Distilled experiences are surfaced to the LLM as additional general
     # guidance — same channel as target-less prompts. The user can curate
     # them via the right-sidebar 经验 section.
     for exp in list_experiences_for_account(account_id):
         text = (exp.get("text") or "").strip()
         if text:
-            user_prompts.append({"text": "经验: " + text, "target_folder": None})
+            user_prompts.append({
+                "text": "经验: " + text,
+                "target_folder": None,
+                "_kind": "experience",
+                "_id": exp.get("id") or "",
+            })
     return {
         "system_prompt": read_system_spam_prompt(),
         "user_prompts_with_targets": user_prompts,
@@ -1728,7 +1967,7 @@ def classify_unsorted(user: User = Depends(current_user)) -> ClassifyUnsortedRes
         if (rec.get("category") or "") != UNCLASSIFIED:
             continue
         total += 1
-        category, important, reason = classify_email_record(
+        category, important, reason, trace = classify_email_record(
             from_email=rec.get("from_email") or "",
             to_email=rec.get("to_email") or "",
             cc_email=rec.get("cc_email") or "",
@@ -1749,6 +1988,7 @@ def classify_unsorted(user: User = Depends(current_user)) -> ClassifyUnsortedRes
             # Keep tombstone but refresh the reason so the user can see why.
             rec["spam_reason"] = reason
             remaining += 1
+        _append_classification_trace(rec, trace)
 
     write_emails(emails)
     return ClassifyUnsortedResult(
@@ -1801,7 +2041,7 @@ def classify_unsorted_stream(user: User = Depends(current_user)) -> StreamingRes
             skipped = 0
             for idx, rec in enumerate(scope):
                 try:
-                    category, important, reason = classify_email_record(
+                    category, important, reason, trace = classify_email_record(
                         from_email=rec.get("from_email") or "",
                         to_email=rec.get("to_email") or "",
                         cc_email=rec.get("cc_email") or "",
@@ -1823,6 +2063,7 @@ def classify_unsorted_stream(user: User = Depends(current_user)) -> StreamingRes
                     else:
                         rec["spam_reason"] = reason
                         remaining += 1
+                    _append_classification_trace(rec, trace)
 
                     progress(
                         {
@@ -1961,7 +2202,7 @@ def reclassify_all_stream(user: User = Depends(current_user)) -> StreamingRespon
                 rec["important"] = False
 
                 try:
-                    category, important, reason = classify_email_record(
+                    category, important, reason, trace = classify_email_record(
                         from_email=rec.get("from_email") or "",
                         to_email=rec.get("to_email") or "",
                         cc_email=rec.get("cc_email") or "",
@@ -1976,6 +2217,7 @@ def reclassify_all_stream(user: User = Depends(current_user)) -> StreamingRespon
                     rec["category"] = category or UNCLASSIFIED
                     rec["important"] = bool(important)
                     rec["spam_reason"] = reason
+                    _append_classification_trace(rec, trace)
                     if rec["category"] != old_cat:
                         changed += 1
                     progress(

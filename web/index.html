@@ -3223,6 +3223,43 @@
       </div>
     </div>
 
+    <!-- Experience one-click organize preview modal. Loaded from
+         POST /api/experiences/organize/preview; user reviews the LLM's
+         proposed dedup/merge/conflict-resolution plan, then confirms to
+         apply it. Bootstrapped by openOrganizeExperiencesModal. -->
+    <div
+      class="modal-backdrop"
+      id="organize_experiences_modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="organize_experiences_modal_title"
+    >
+      <div class="modal-card" style="max-width:720px;width:100%;max-height:80vh;display:flex;flex-direction:column">
+        <div class="modal-head">
+          <h3 id="organize_experiences_modal_title">经验整理预览</h3>
+        </div>
+        <div class="modal-body" style="overflow-y:auto;flex:1">
+          <div
+            id="organize_status"
+            style="margin-bottom:10px;font-size:12px;color:var(--text-muted)"
+          ></div>
+          <div id="organize_plan"></div>
+        </div>
+        <div class="modal-foot">
+          <div class="foot-right">
+            <button class="btn" type="button" onclick="closeOrganizeExperiencesModal()">取消</button>
+            <button
+              class="btn btn-primary"
+              type="button"
+              id="btn_organize_apply"
+              onclick="applyOrganizeExperiences()"
+              disabled
+            >确认应用</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Address-chip → contact quick-edit modal. Opens when the user clicks
          a From/To/Cc/Bcc chip in the email detail. If the address is
          already in the active account's address book the modal opens in
@@ -4603,6 +4640,17 @@
                 ${btnLabel}
               </button>
             </div>
+            <div class="row" style="align-items:center;gap:6px;margin-top:4px">
+              <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted);cursor:pointer">
+                <input
+                  type="checkbox"
+                  id="fixed_new_mark_important"
+                  ${EDITING_RULE && EDITING_RULE.mark_important ? "checked" : ""}
+                  style="margin:0"
+                />
+                <span>${t("☆ 命中后自动标为「重要」邮件")}</span>
+              </label>
+            </div>
             <div class="nl-add-hint">
               ${t("规则按上下顺序优先级判定；输入")} <code>@{</code> ${t("可触发名字补全；保存时检测循环引用。")}
             </div>
@@ -4648,7 +4696,7 @@
               </div>
               <span class="target-pill">→ ${escapeHtml(
                 folderDisplayLabel(r.target_folder)
-              )}</span>
+              )}${r.mark_important ? ' <span title="命中后自动标为重要" style="margin-left:4px">⭐</span>' : ""}</span>
             </div>
             ${
               r.explanation
@@ -4722,6 +4770,7 @@
           code_preview: rule.code_preview || "",
           program: rule.program || {},
           refs: rule.refs || [],
+          mark_important: !!rule.mark_important,
           editing_id: rule.id,
         };
         openRulePreviewModal(COMPILE_PREVIEW);
@@ -4733,9 +4782,11 @@
         const ta = $("fixed_new_nl");
         const tgt = $("fixed_new_target");
         const nameEl = $("fixed_new_name");
+        const impEl = $("fixed_new_mark_important");
         const nl = (ta && ta.value || "").trim();
         const target = tgt && tgt.value || "";
         const name = (nameEl && nameEl.value || "").trim();
+        const markImportant = !!(impEl && impEl.checked);
         if (!nl) {
           setStatus(t("请先用自然语言描述规则"), "error");
           ta && ta.focus();
@@ -4759,6 +4810,7 @@
               target_folder: target,
               name,
               editing_id: editingId,
+              mark_important: markImportant,
             }),
           });
           COMPILE_PREVIEW = { ...data, editing_id: editingId };
@@ -4775,9 +4827,13 @@
         $("rule_preview_nl").textContent = preview.nl_text || "";
         $("rule_preview_explanation").textContent = preview.explanation || "";
         $("rule_preview_code").textContent = preview.code_preview || "";
-        $("rule_preview_target").textContent = folderDisplayLabel(
-          preview.target_folder
-        );
+        // Show the target folder plus a ⭐ suffix when the rule will also
+        // flag the email as important, so the user isn't surprised after
+        // confirming the preview.
+        const targetLabel = folderDisplayLabel(preview.target_folder);
+        $("rule_preview_target").textContent = preview.mark_important
+          ? `${targetLabel}  ⭐ 同时标为重要`
+          : targetLabel;
         const nameEl = $("rule_preview_name");
         if (nameEl) {
           const refList = (preview.refs || []).join(", ");
@@ -4895,6 +4951,7 @@
           code_preview: preview.code_preview || "",
           program: preview.program,
           refs: preview.refs || [],
+          mark_important: !!preview.mark_important,
         });
         try {
           if (preview.editing_id) {
@@ -5292,6 +5349,10 @@
         const cards = items
           .map((x, idx) => renderExperienceCard(x, idx))
           .join("");
+        // Organize button only makes sense when there are ≥ 2 items to
+        // consider. Keeping it out of the DOM avoids drawing a disabled
+        // stub on the empty state.
+        const canOrganize = items.length >= 2;
         wrap.innerHTML = `
           <div class="section-head ${headClass}" onclick="toggleSection('experiences')">
             <span class="section-title">${t("💡 经验")} <span class="section-count">${items.length}</span></span>
@@ -5304,6 +5365,18 @@
                 ${t("点击「☆ 标为重要」或「★ 取消重要」时，系统会请你说明理由并把它沉淀为一条经验。 你也可以在下方手动添加 / 修改 / 删除经验。所有经验都会作为通用指引发给大模型。")}
               </div>
             </details>
+            ${
+              canOrganize
+                ? `<div style="margin:8px 0 4px">
+                    <button
+                      class="btn"
+                      id="btn_organize_experiences"
+                      onclick="startOrganizeExperiences(event)"
+                      title="${escapeHtml(t("让大模型识别重复/冲突并给出整理方案；执行前会预览"))}"
+                    >${t("🧹 一键整理")}</button>
+                  </div>`
+                : ""
+            }
             ${
               items.length
                 ? cards
@@ -5420,6 +5493,129 @@
           await loadPrompts();
         } catch (err) {
           setStatus(err.message, "error");
+        }
+      }
+
+      // Preview → confirm → apply flow for the 「一键整理」button. The
+      // preview call never mutates; the LLM proposes actions and the user
+      // sees exactly what will be deleted / merged before anything happens.
+      let ORGANIZE_PLAN = null;
+
+      async function startOrganizeExperiences(ev) {
+        if (ev && ev.stopPropagation) ev.stopPropagation();
+        const btn = $("btn_organize_experiences");
+        const oldLabel = btn ? btn.textContent : "";
+        if (btn) { btn.disabled = true; btn.textContent = t("分析中…"); }
+        try {
+          const plan = await api("/api/experiences/organize/preview", {
+            method: "POST",
+          });
+          ORGANIZE_PLAN = plan;
+          openOrganizeExperiencesModal(plan);
+        } catch (err) {
+          setStatus(err.message || t("整理失败"), "error");
+        } finally {
+          if (btn) { btn.disabled = false; btn.textContent = oldLabel; }
+        }
+      }
+
+      function openOrganizeExperiencesModal(plan) {
+        const modal = $("organize_experiences_modal");
+        const status = $("organize_status");
+        const planBox = $("organize_plan");
+        const applyBtn = $("btn_organize_apply");
+        // Index of current experiences by id so we can render "before/after"
+        // text side by side. `PROMPTS_STATE.experiences` is the frontend's
+        // authoritative snapshot at the time this modal opened.
+        const byId = {};
+        for (const e of PROMPTS_STATE.experiences || []) byId[e.id] = e;
+
+        const actions = (plan && plan.actions) || [];
+        const drops = actions.filter((a) => a.type === "drop");
+        const merges = actions.filter((a) => a.type === "merge");
+        const keeps = actions.filter((a) => a.type === "keep");
+        const deleteCount = drops.reduce((n, a) => n + a.ids.length, 0)
+                          + merges.reduce((n, a) => n + a.from_ids.length, 0);
+        const addCount = merges.length;
+
+        if (plan.error) {
+          status.textContent = "❗ " + plan.error;
+          status.style.color = "var(--danger)";
+        } else if (deleteCount === 0 && addCount === 0) {
+          status.textContent = t("经验已经很干净了，没有可整理的项。");
+          status.style.color = "var(--text-muted)";
+        } else {
+          status.textContent = `${t("将删除")} ${deleteCount} ${t("条，合并为")} ${addCount} ${t("条新经验。")}`;
+          status.style.color = "var(--text)";
+        }
+
+        const parts = [];
+        if (drops.length) {
+          parts.push(`<h4 style="margin:12px 0 6px;font-size:13px">🗑 ${t("将删除")}（${drops.reduce((n,a)=>n+a.ids.length,0)}）</h4>`);
+          for (const a of drops) {
+            for (const eid of a.ids) {
+              const orig = byId[eid];
+              parts.push(`
+                <div style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:6px;background:var(--surface-muted)">
+                  <div style="font-size:11px;color:var(--text-subtle);margin-bottom:2px">#${escapeHtml(eid)}</div>
+                  <div style="font-size:13px;text-decoration:line-through;color:var(--text-muted)">${escapeHtml((orig && orig.text) || "(缺失)")}</div>
+                  ${a.reason ? `<div style="font-size:11px;color:var(--text-muted);margin-top:4px">${escapeHtml(t("理由:"))} ${escapeHtml(a.reason)}</div>` : ""}
+                </div>
+              `);
+            }
+          }
+        }
+        if (merges.length) {
+          parts.push(`<h4 style="margin:12px 0 6px;font-size:13px">🔗 ${t("将合并")}（${merges.length}）</h4>`);
+          for (const a of merges) {
+            const originals = a.from_ids.map(
+              (i) => `<li style="font-size:12px;color:var(--text-muted);text-decoration:line-through">${escapeHtml((byId[i] && byId[i].text) || "(缺失)")}</li>`
+            ).join("");
+            parts.push(`
+              <div style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:6px">
+                <ul style="margin:0 0 6px 18px;padding:0">${originals}</ul>
+                <div style="font-size:13px;color:var(--success)">→ ${escapeHtml(a.new_text)}</div>
+              </div>
+            `);
+          }
+        }
+        if (keeps.length && (drops.length || merges.length)) {
+          const keptCount = keeps.reduce((n, a) => n + a.ids.length, 0);
+          parts.push(`<div style="margin-top:12px;font-size:12px;color:var(--text-muted)">✓ ${keptCount} ${t("条保留不变")}</div>`);
+        }
+        planBox.innerHTML = parts.join("") || `<div style="color:var(--text-muted)">${t("没有变动。")}</div>`;
+        applyBtn.disabled = plan.error || (deleteCount === 0 && addCount === 0);
+        applyBtn.textContent = t("确认应用");
+        modal.classList.add("open");
+      }
+
+      function closeOrganizeExperiencesModal() {
+        const m = $("organize_experiences_modal");
+        if (m) m.classList.remove("open");
+        ORGANIZE_PLAN = null;
+      }
+
+      async function applyOrganizeExperiences() {
+        if (!ORGANIZE_PLAN) { closeOrganizeExperiencesModal(); return; }
+        const applyBtn = $("btn_organize_apply");
+        applyBtn.disabled = true;
+        applyBtn.textContent = t("执行中…");
+        try {
+          const res = await api("/api/experiences/organize/apply", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(ORGANIZE_PLAN),
+          });
+          setStatus(
+            `${t("整理完成:删除")} ${res.deleted} ${t("条，新增")} ${res.merged_into} ${t("条合并结果")}`,
+            "success"
+          );
+          closeOrganizeExperiencesModal();
+          await loadPrompts();
+        } catch (err) {
+          setStatus(err.message || t("整理失败"), "error");
+          applyBtn.disabled = false;
+          applyBtn.textContent = t("确认应用");
         }
       }
 
