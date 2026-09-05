@@ -1632,6 +1632,59 @@
         width: 3px;
         background: var(--primary);
       }
+      /* Multi-select: a distinct-from-.active highlight so users can see
+         at a glance which rows are in the selection set (vs. which one
+         is currently open in the detail pane). */
+      .mail-item.selected {
+        background: rgba(37, 99, 235, 0.14);
+      }
+      .mail-item.selected.active {
+        background: rgba(37, 99, 235, 0.22);
+      }
+      /* Selection bar shown above the list body when 2+ rows are selected. */
+      .selection-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 6px 12px;
+        background: rgba(37, 99, 235, 0.10);
+        border-bottom: 1px solid var(--border);
+        font-size: 12px;
+        color: var(--text);
+      }
+      .selection-bar .link-btn {
+        background: none;
+        border: none;
+        color: #2563eb;
+        cursor: pointer;
+        font: inherit;
+        padding: 0;
+      }
+      .selection-bar .link-btn:hover { text-decoration: underline; }
+      /* AI-search results banner: a persistent header that reminds the
+         user the visible list is filtered by an AI search, with a way
+         to exit that view. */
+      .aisearch-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 6px 12px;
+        background: rgba(16, 185, 129, 0.10);
+        border-bottom: 1px solid var(--border);
+        font-size: 12px;
+        color: var(--text);
+      }
+      .aisearch-bar .link-btn {
+        background: none;
+        border: none;
+        color: #059669;
+        cursor: pointer;
+        font: inherit;
+        padding: 0;
+      }
+      .aisearch-bar .link-btn:hover { text-decoration: underline; }
       .mail-item .row1 {
         display: flex;
         justify-content: space-between;
@@ -2968,6 +3021,15 @@
                   >
                     搜索
                   </button>
+                  <button
+                    class="btn"
+                    id="btn_ai_search"
+                    type="button"
+                    onclick="openAiSearchModal()"
+                    title="用大模型对指定日期范围的邮件逐一判断是否满足自然语言描述的检索需求"
+                  >
+                    🧠 智能检索
+                  </button>
                   <label
                     class="toggle-switch"
                     id="toggle_merge"
@@ -3074,6 +3136,7 @@
 
     <div class="folder-context-menu" id="folder_context_menu">
       <button type="button" id="folder_menu_add">新建子文件夹</button>
+      <button type="button" id="folder_menu_reclassify">🧠 重新智能分类</button>
       <button type="button" id="folder_menu_delete" class="danger">删除文件夹</button>
     </div>
 
@@ -3223,6 +3286,61 @@
       </div>
     </div>
 
+    <!-- Auto experience-suggestion modal. Opens AFTER an email has already
+         been re-categorized (by right-click 移动到 X or drag-drop into a
+         folder). Backend generates a candidate experience from the move
+         and simultaneously checks the account's existing experience
+         corpus for a semantic duplicate. User only needs one click to
+         confirm (add / reuse existing / skip). -->
+    <div
+      class="modal-backdrop"
+      id="experience_suggest_modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="experience_suggest_modal_title"
+    >
+      <div class="modal-card" style="max-width:620px;width:100%">
+        <div class="modal-head">
+          <h3 id="experience_suggest_modal_title">AI 建议经验</h3>
+        </div>
+        <div class="modal-body">
+          <div id="experience_suggest_context"
+               style="font-size:12px;color:var(--text-muted);margin-bottom:10px"></div>
+          <div id="experience_suggest_loading"
+               style="text-align:center;padding:24px;color:var(--text-muted);font-size:13px">
+            正在分析并生成候选经验…
+          </div>
+          <div id="experience_suggest_content" style="display:none">
+            <div id="experience_suggest_dup_hint"
+                 style="display:none;background:rgba(37,99,235,0.06);border:1px solid rgba(37,99,235,0.25);border-radius:6px;padding:10px;margin-bottom:10px;font-size:12px"></div>
+            <label style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:4px">
+              候选经验(可编辑)
+            </label>
+            <textarea
+              id="experience_suggest_text"
+              rows="3"
+              style="width:100%;font-size:13px;padding:8px;box-sizing:border-box"
+            ></textarea>
+            <div id="experience_suggest_reason"
+                 style="font-size:11px;color:var(--text-subtle);margin-top:6px"></div>
+          </div>
+          <div id="experience_suggest_error"
+               style="display:none;color:var(--danger);font-size:12px;margin-top:8px"></div>
+        </div>
+        <div class="modal-foot">
+          <div class="foot-right">
+            <button class="btn" type="button" id="btn_exp_suggest_skip"
+                    onclick="confirmExperienceSuggest('skip')">跳过不记</button>
+            <button class="btn" type="button" id="btn_exp_suggest_reuse"
+                    onclick="confirmExperienceSuggest('reuse')"
+                    style="display:none">✓ 复用现有</button>
+            <button class="btn btn-primary" type="button" id="btn_exp_suggest_add"
+                    onclick="confirmExperienceSuggest('add')" disabled>＋ 新增经验</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Experience one-click organize preview modal. Loaded from
          POST /api/experiences/organize/preview; user reviews the LLM's
          proposed dedup/merge/conflict-resolution plan, then confirms to
@@ -3255,6 +3373,162 @@
               onclick="applyOrganizeExperiences()"
               disabled
             >确认应用</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- One-click prompt organize preview modal. Mirrors the experiences
+         organize modal but shows prompt-specific fields: name chip +
+         target_folder chip on each row. Backed by POST
+         /api/prompts/organize/preview + /apply. -->
+    <div
+      class="modal-backdrop"
+      id="organize_prompts_modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="organize_prompts_modal_title"
+    >
+      <div class="modal-card" style="max-width:720px;width:100%;max-height:80vh;display:flex;flex-direction:column">
+        <div class="modal-head">
+          <h3 id="organize_prompts_modal_title">提示整理预览</h3>
+        </div>
+        <div class="modal-body" style="overflow-y:auto;flex:1">
+          <div
+            id="organize_prompts_status"
+            style="margin-bottom:10px;font-size:12px;color:var(--text-muted)"
+          ></div>
+          <div id="organize_prompts_plan"></div>
+        </div>
+        <div class="modal-foot">
+          <div class="foot-right">
+            <button class="btn" type="button" onclick="closeOrganizePromptsModal()">取消</button>
+            <button
+              class="btn btn-primary"
+              type="button"
+              id="btn_organize_prompts_apply"
+              onclick="applyOrganizePrompts()"
+              disabled
+            >确认应用</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 智能检索 (AI-powered search) input modal. Backed by
+         /api/tasks/ai-search/start — task-based, so progress + pause +
+         cancel come from the standard task modal for free. -->
+    <div
+      class="modal-backdrop"
+      id="ai_search_modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="ai_search_modal_title"
+    >
+      <div class="modal-card" style="max-width:560px;width:100%">
+        <div class="modal-head">
+          <h3 id="ai_search_modal_title">🧠 智能检索</h3>
+        </div>
+        <div class="modal-body">
+          <p style="margin:0 0 10px;font-size:13px;color:var(--text-muted);line-height:1.55">
+            用自然语言描述要找的邮件,系统会用大模型对指定日期范围内的每封邮件
+            逐一判断是否满足需求(每封一次 LLM 调用,时长与邮件数量成正比,
+            可暂停/取消)。
+          </p>
+          <div class="field">
+            <label for="ai_search_query">检索需求</label>
+            <textarea
+              id="ai_search_query"
+              rows="3"
+              placeholder="例:找出申请选修「计算概论」课程的邮件"
+              style="width:100%;padding:8px;box-sizing:border-box;font-size:13px"
+            ></textarea>
+          </div>
+          <div class="field">
+            <label for="ai_search_scope">检索范围</label>
+            <select
+              id="ai_search_scope"
+              style="width:100%;padding:8px;box-sizing:border-box"
+            ></select>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
+              限定范围可减少 LLM 调用次数,加快检索;选「全部文件夹」时会扫全部收件(除回收站)。
+            </div>
+          </div>
+          <div class="field" style="display:flex;gap:12px">
+            <div style="flex:1">
+              <label for="ai_search_start">起始日期</label>
+              <input
+                id="ai_search_start"
+                type="date"
+                style="width:100%;padding:8px;box-sizing:border-box"
+              />
+            </div>
+            <div style="flex:1">
+              <label for="ai_search_end">截止日期</label>
+              <input
+                id="ai_search_end"
+                type="date"
+                style="width:100%;padding:8px;box-sizing:border-box"
+              />
+            </div>
+          </div>
+          <div id="ai_search_status"
+               style="min-height:16px;margin-top:6px;font-size:12px;color:var(--text-muted)"></div>
+        </div>
+        <div class="modal-foot">
+          <div class="foot-right">
+            <button class="btn" type="button" onclick="closeAiSearchModal()">取消</button>
+            <button class="btn btn-primary" type="button" id="btn_ai_search_start"
+                    onclick="startAiSearch()">开始检索</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Long-running-task progress modal. Backed by /api/tasks/{id};
+         polled by TaskPoll while any receive / classify / reclassify
+         task is running. Undismissable while running — user must pause
+         or cancel to close. Auto-reappears on page load if a task is
+         still active server-side (survives navigation). -->
+    <div
+      class="modal-backdrop"
+      id="task_progress_modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="task_progress_modal_title"
+    >
+      <div class="modal-card" style="max-width:520px;width:100%">
+        <div class="modal-head">
+          <h3 id="task_progress_modal_title">任务进行中</h3>
+        </div>
+        <div class="modal-body">
+          <div id="task_progress_summary"
+               style="font-size:13px;margin-bottom:8px;color:var(--text)"></div>
+          <div style="background:rgba(127,127,127,0.15);border-radius:6px;height:12px;overflow:hidden;margin:8px 0">
+            <div id="task_progress_bar"
+                 style="height:100%;width:0%;background:var(--primary,#2563eb);transition:width 200ms ease"></div>
+          </div>
+          <div id="task_progress_counters"
+               style="font-size:12px;color:var(--text-muted);margin-top:4px"></div>
+          <div id="task_progress_last"
+               style="font-size:12px;color:var(--text-muted);margin-top:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>
+          <div id="task_progress_error"
+               style="display:none;color:var(--danger);font-size:12px;margin-top:8px;white-space:pre-wrap"></div>
+          <div id="task_progress_paused_hint"
+               style="display:none;font-size:12px;color:var(--warn,#c47f00);margin-top:8px">
+            已暂停 — 点击「继续」恢复。任务在后台仍占用当前账号，请勿开启另一个同类任务。
+          </div>
+        </div>
+        <div class="modal-foot">
+          <div class="foot-right">
+            <button class="btn" type="button" id="btn_task_cancel"
+                    onclick="onTaskCancel()">取消任务</button>
+            <button class="btn" type="button" id="btn_task_pause"
+                    onclick="onTaskPause()">暂停</button>
+            <button class="btn btn-primary" type="button" id="btn_task_resume"
+                    onclick="onTaskResume()" style="display:none">继续</button>
+            <button class="btn btn-primary" type="button" id="btn_task_close"
+                    onclick="onTaskClose()" style="display:none">关闭</button>
           </div>
         </div>
       </div>
@@ -3764,7 +4038,21 @@
         </div>
       </div>
       <div class="modal-foot">
-        <div class="hint" id="compose_hint"></div>
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          <span class="hint" id="compose_hint"></span>
+          <label
+            id="send_independently_label"
+            style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:var(--text-muted)"
+            title="勾选后:系统会对 To/Cc/Bcc 每个收件人分别发送一份,每个人收到的邮件里只显示自己作为收件人,看不到其他人。"
+          >
+            <input
+              type="checkbox"
+              id="send_independently"
+              style="margin:0"
+            />
+            <span>分别独立发送(每人只看到自己)</span>
+          </label>
+        </div>
         <div class="foot-right">
           <button class="btn" onclick="requestCloseCompose()">取消</button>
           <button class="btn" onclick="saveDraft()" id="btn_draft">暂存</button>
@@ -3985,6 +4273,264 @@
         if (typeof d === "object") return d.msg || d.message || JSON.stringify(d);
         return String(d);
       }
+
+      // -------- background task poll (receive / classify / reclassify) --------
+      // Long-running work now runs server-side as a background task
+      // (see app/services/task_registry.py). This module drives the
+      // progress modal: starts polling on start, keeps polling until a
+      // terminal state, and reattaches on page load if there's already
+      // one running (which is how "keeping progress visible across
+      // navigation" works — the task lives on the backend, this module
+      // just re-syncs the modal to it).
+      const TaskPoll = (() => {
+        let currentTaskId = null;
+        let currentTaskKind = null;
+        let pollTimer = null;
+        let doneCallback = null;   // called with the terminal TaskInfo
+        // How to react to task completion — set by the caller that
+        // started the task (e.g. receive should refreshAll() on done).
+        const KIND_ON_DONE = {
+          receive: null,      // set by receiveEmails at start time
+          classify_unsorted: null,
+          reclassify_all: null,
+        };
+
+        function isRunning() {
+          return !!currentTaskId;
+        }
+
+        function openModal() {
+          const m = document.getElementById("task_progress_modal");
+          if (m) m.classList.add("open");
+        }
+        function closeModal() {
+          const m = document.getElementById("task_progress_modal");
+          if (m) m.classList.remove("open");
+        }
+
+        function renderTaskInfo(info) {
+          const titleEl = document.getElementById("task_progress_modal_title");
+          const sumEl = document.getElementById("task_progress_summary");
+          const barEl = document.getElementById("task_progress_bar");
+          const cntEl = document.getElementById("task_progress_counters");
+          const lastEl = document.getElementById("task_progress_last");
+          const errEl = document.getElementById("task_progress_error");
+          const pauseHint = document.getElementById("task_progress_paused_hint");
+          const btnPause = document.getElementById("btn_task_pause");
+          const btnResume = document.getElementById("btn_task_resume");
+          const btnCancel = document.getElementById("btn_task_cancel");
+          const btnClose = document.getElementById("btn_task_close");
+
+          const label = info.label || "任务";
+          const status = info.status || "running";
+          const progress = info.progress || {};
+          const result = info.result || {};
+          const total = Number(progress.total || 0);
+          const index = Number(progress.index || 0);
+          const percent = total > 0 ? Math.min(100, (index / total) * 100) : 0;
+
+          const statusTag =
+            status === "running"   ? "进行中" :
+            status === "paused"    ? "已暂停" :
+            status === "done"      ? "已完成" :
+            status === "cancelled" ? "已取消" :
+            status === "error"     ? "出错" : status;
+          titleEl.textContent = `${label} · ${statusTag}`;
+
+          const phase = progress.phase || "";
+          const phaseTxt =
+            phase === "connecting" ? "正在连接邮箱…" :
+            phase === "searching"  ? "正在搜索新邮件…" :
+            phase === "processing" ? (total > 0 ? `处理中 ${index}/${total}` : "处理中…") :
+            phase === "loading"    ? "读取本地邮件…" :
+            phase === "saving"     ? "保存中…" :
+            phase === "done"       ? "已完成" : "";
+          sumEl.textContent = phaseTxt || `${label}…`;
+
+          barEl.style.width = `${percent.toFixed(1)}%`;
+
+          const parts = [];
+          if (total > 0) parts.push(`${index}/${total} (${percent.toFixed(0)}%)`);
+          if (progress.skipped_count) parts.push(`跳过 ${progress.skipped_count}`);
+          if (progress.saved_count != null) parts.push(`已存盘 ${progress.saved_count}`);
+          if (progress.cum_stored != null) parts.push(`新增 ${progress.cum_stored}`);
+          if (progress.mode) {
+            const modeTxt = progress.mode === "incremental" ? "增量" :
+                            progress.mode === "widened" ? "扩大窗口" :
+                            progress.mode === "initial" ? "首次" : progress.mode;
+            parts.push(modeTxt);
+          }
+          if (progress.already_known) parts.push(`已存 ${progress.already_known}`);
+          if (progress.changed != null && progress.changed > 0) parts.push(`变更 ${progress.changed}`);
+          cntEl.textContent = parts.join(" · ");
+
+          const last = progress.last_event || null;
+          if (last) {
+            if (last.type === "classified") {
+              lastEl.textContent = `[${last.category || "未分类"}] ${last.subject || "(无主题)"}`;
+            } else if (last.type === "skipped") {
+              lastEl.textContent = `跳过 UID ${last.uid || "?"}：${last.reason || "-"}`;
+            } else {
+              lastEl.textContent = "";
+            }
+          } else if (status === "done") {
+            const bits = [];
+            if (result.fetched != null) bits.push(`收取 ${result.fetched}`);
+            if (result.stored != null) bits.push(`新增 ${result.stored}`);
+            if (result.classified != null) bits.push(`分类 ${result.classified}`);
+            if (result.changed != null && result.changed > 0) bits.push(`变更 ${result.changed}`);
+            if (result.remaining != null) bits.push(`仍未分类 ${result.remaining}`);
+            if (result.skipped != null && result.skipped > 0) bits.push(`跳过 ${result.skipped}`);
+            lastEl.textContent = bits.join(" · ") || "完成";
+          } else {
+            lastEl.textContent = "";
+          }
+
+          if (info.error) {
+            errEl.style.display = "";
+            errEl.textContent = info.error;
+          } else {
+            errEl.style.display = "none";
+          }
+
+          const terminal = ["done", "error", "cancelled"].includes(status);
+          pauseHint.style.display = status === "paused" ? "" : "none";
+          btnPause.style.display = (status === "running" && !terminal) ? "" : "none";
+          btnResume.style.display = (status === "paused" && !terminal) ? "" : "none";
+          btnCancel.style.display = terminal ? "none" : "";
+          btnClose.style.display = terminal ? "" : "none";
+        }
+
+        async function poll() {
+          if (!currentTaskId) return;
+          let info;
+          try {
+            info = await api(`/api/tasks/${encodeURIComponent(currentTaskId)}`);
+          } catch (err) {
+            // Task may have been GC'd (backend restart, older than 1h).
+            // Detach silently.
+            detach();
+            closeModal();
+            return;
+          }
+          renderTaskInfo(info);
+          if (["done", "error", "cancelled"].includes(info.status)) {
+            // Stop polling — modal stays open in "closable" state until
+            // the user hits 关闭.
+            if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+            if (doneCallback) {
+              try { doneCallback(info); } catch (_) {}
+              doneCallback = null;
+            }
+            return;
+          }
+          pollTimer = setTimeout(poll, 500);
+        }
+
+        function attach(info, onDone) {
+          currentTaskId = info.id;
+          currentTaskKind = info.kind;
+          doneCallback = onDone || null;
+          renderTaskInfo(info);
+          openModal();
+          if (pollTimer) clearTimeout(pollTimer);
+          pollTimer = setTimeout(poll, 300);
+        }
+
+        function detach() {
+          currentTaskId = null;
+          currentTaskKind = null;
+          doneCallback = null;
+          if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+        }
+
+        async function start(startUrl, opts) {
+          opts = opts || {};
+          try {
+            const info = await api(startUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: opts.body ? JSON.stringify(opts.body) : undefined,
+            });
+            attach(info, opts.onDone);
+            return info;
+          } catch (err) {
+            alert((err && err.message) || String(err));
+            return null;
+          }
+        }
+
+        async function reattachIfActive() {
+          // Called on page boot. If there's a running task server-side,
+          // reopen the modal + reattach the poller.
+          let resp;
+          try {
+            resp = await api("/api/tasks/active");
+          } catch (_) {
+            return;
+          }
+          if (resp && resp.task) {
+            // Give the caller a chance to hook a done callback so
+            // e.g. reattached receive still triggers refreshAll on
+            // completion.
+            const onDone = KIND_ON_DONE[resp.task.kind] || null;
+            attach(resp.task, onDone);
+          }
+        }
+
+        async function pauseCurrent() {
+          if (!currentTaskId) return;
+          try {
+            const info = await api(`/api/tasks/${encodeURIComponent(currentTaskId)}/pause`, { method: "POST" });
+            renderTaskInfo(info);
+          } catch (err) { alert(err.message); }
+        }
+
+        async function resumeCurrent() {
+          if (!currentTaskId) return;
+          try {
+            const info = await api(`/api/tasks/${encodeURIComponent(currentTaskId)}/resume`, { method: "POST" });
+            renderTaskInfo(info);
+            if (info.status === "running" && !pollTimer) {
+              pollTimer = setTimeout(poll, 300);
+            }
+          } catch (err) { alert(err.message); }
+        }
+
+        async function cancelCurrent() {
+          if (!currentTaskId) return;
+          if (!confirm("确定要取消当前任务吗？")) return;
+          try {
+            const info = await api(`/api/tasks/${encodeURIComponent(currentTaskId)}/cancel`, { method: "POST" });
+            renderTaskInfo(info);
+            if (!pollTimer) pollTimer = setTimeout(poll, 300);
+          } catch (err) { alert(err.message); }
+        }
+
+        async function closeCurrent() {
+          if (!currentTaskId) { closeModal(); detach(); return; }
+          try {
+            await api(`/api/tasks/${encodeURIComponent(currentTaskId)}/ack`, { method: "POST" });
+          } catch (_) {}
+          detach();
+          closeModal();
+        }
+
+        function setKindDoneHook(kind, fn) {
+          KIND_ON_DONE[kind] = fn;
+        }
+
+        return {
+          start, reattachIfActive, isRunning,
+          pauseCurrent, resumeCurrent, cancelCurrent, closeCurrent,
+          setKindDoneHook,
+        };
+      })();
+
+      function onTaskPause()  { TaskPoll.pauseCurrent(); }
+      function onTaskResume() { TaskPoll.resumeCurrent(); }
+      function onTaskCancel() { TaskPoll.cancelCurrent(); }
+      function onTaskClose()  { TaskPoll.closeCurrent(); }
 
       let CURRENT_USER = null;
       let SYSTEM_MODE = "dev"; // dev | prod — refreshed on bootstrap
@@ -4411,14 +4957,14 @@
       // route to a single folder).
       const ALL_FOLDERS_SENTINEL = "*";
 
-      function folderOptionsHtml(selected, includeEmpty) {
+      function folderOptionsHtml(selected, includeEmpty, emptyLabel) {
         const folders = PROMPTS_STATE.available_folders || [];
         const opts = [];
         if (includeEmpty) {
           opts.push(
             `<option value="" ${
               !selected ? "selected" : ""
-            }>（不指定，通用指引）</option>`
+            }>${escapeHtml(emptyLabel || "（不指定，通用指引）")}</option>`
           );
         } else if (!selected) {
           opts.push(`<option value="" disabled selected>选择文件夹</option>`);
@@ -4630,7 +5176,8 @@
             <div class="row">
               <select id="fixed_new_target" class="grow">${folderOptionsHtml(
                 EDITING_RULE ? EDITING_RULE.target_folder || "" : "",
-                false
+                true,
+                t("（不改变分类，仅用于「重要」标签规则）")
               )}</select>
               <button
                 class="btn btn-primary"
@@ -4641,15 +5188,22 @@
               </button>
             </div>
             <div class="row" style="align-items:center;gap:6px;margin-top:4px">
-              <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted);cursor:pointer">
-                <input
-                  type="checkbox"
-                  id="fixed_new_mark_important"
-                  ${EDITING_RULE && EDITING_RULE.mark_important ? "checked" : ""}
-                  style="margin:0"
-                />
-                <span>${t("☆ 命中后自动标为「重要」邮件")}</span>
+              <label style="font-size:12px;color:var(--text-muted)">
+                ${t("命中时对「重要」标签的操作:")}
               </label>
+              <select id="fixed_new_importance_action" style="font-size:12px">
+                <option value="none" ${
+                  EDITING_RULE && !EDITING_RULE.mark_important && !EDITING_RULE.unmark_important
+                    ? "selected"
+                    : (!EDITING_RULE ? "selected" : "")
+                }>${t("不改变")}</option>
+                <option value="mark" ${
+                  EDITING_RULE && EDITING_RULE.mark_important ? "selected" : ""
+                }>${t("☆ 标为重要")}</option>
+                <option value="unmark" ${
+                  EDITING_RULE && EDITING_RULE.unmark_important ? "selected" : ""
+                }>${t("✗ 取消重要")}</option>
+              </select>
             </div>
             <div class="nl-add-hint">
               ${t("规则按上下顺序优先级判定；输入")} <code>@{</code> ${t("可触发名字补全；保存时检测循环引用。")}
@@ -4694,9 +5248,23 @@
                 </div>
                 ${escapeHtml(r.nl_text || t("(无描述)"))}
               </div>
-              <span class="target-pill">→ ${escapeHtml(
-                folderDisplayLabel(r.target_folder)
-              )}${r.mark_important ? ' <span title="命中后自动标为重要" style="margin-left:4px">⭐</span>' : ""}</span>
+              <span class="target-pill">${(() => {
+                // Compose the outcome pill from the three orthogonal effects:
+                //   • target_folder set → "→ 分类名"
+                //   • empty target      → "→ (不改变分类)"
+                //   • mark_important    → append ⭐
+                //   • unmark_important  → append ✗ 重要
+                const folderLabel = folderDisplayLabel(r.target_folder);
+                const parts = [];
+                parts.push("→ " + escapeHtml(folderLabel || t("(不改变分类)")));
+                if (r.mark_important) {
+                  parts.push('<span title="命中后自动标为重要" style="margin-left:4px">⭐</span>');
+                }
+                if (r.unmark_important) {
+                  parts.push('<span title="命中后自动取消重要" style="margin-left:4px;color:var(--text-subtle)">✗ ⭐</span>');
+                }
+                return parts.join("");
+              })()}</span>
             </div>
             ${
               r.explanation
@@ -4782,18 +5350,27 @@
         const ta = $("fixed_new_nl");
         const tgt = $("fixed_new_target");
         const nameEl = $("fixed_new_name");
-        const impEl = $("fixed_new_mark_important");
+        const impSel = $("fixed_new_importance_action");
         const nl = (ta && ta.value || "").trim();
-        const target = tgt && tgt.value || "";
+        const target = (tgt && tgt.value || "").trim();
         const name = (nameEl && nameEl.value || "").trim();
-        const markImportant = !!(impEl && impEl.checked);
+        const impAction = (impSel && impSel.value) || "none";
+        const markImportant = impAction === "mark";
+        const unmarkImportant = impAction === "unmark";
         if (!nl) {
           setStatus(t("请先用自然语言描述规则"), "error");
           ta && ta.focus();
           return;
         }
-        if (!target) {
-          setStatus(t("请选择目标文件夹"), "error");
+        // A rule needs SOMETHING to do on match: either route to a folder
+        // or override the ⭐ flag. Reject the all-blank case client-side
+        // so the user doesn't waste an LLM call before finding out.
+        if (!target && !markImportant && !unmarkImportant) {
+          const msg = t(
+            "请选择目标文件夹,或将「重要」标签操作设为「标为重要 / 取消重要」之一。规则不能什么都不做。"
+          );
+          setStatus(msg, "error");
+          alert(msg);
           return;
         }
         const editingId = EDITING_RULE ? EDITING_RULE.id : null;
@@ -4811,12 +5388,19 @@
               name,
               editing_id: editingId,
               mark_important: markImportant,
+              unmark_important: unmarkImportant,
             }),
           });
           COMPILE_PREVIEW = { ...data, editing_id: editingId };
           openRulePreviewModal(COMPILE_PREVIEW);
         } catch (err) {
-          setStatus(err.message, "error");
+          const msg = (err && err.message) || String(err);
+          setStatus(msg, "error");
+          // The compile button lives in a settings side-panel; the
+          // status-bar error line at the top of the app is easy to
+          // miss when the user is focused down here. Pop an alert so a
+          // "click 解析 → no modal" is never silent.
+          alert(t("解析规则失败：") + "\n" + msg);
         } finally {
           btn.disabled = false;
           btn.textContent = oldLabel;
@@ -4827,13 +5411,20 @@
         $("rule_preview_nl").textContent = preview.nl_text || "";
         $("rule_preview_explanation").textContent = preview.explanation || "";
         $("rule_preview_code").textContent = preview.code_preview || "";
-        // Show the target folder plus a ⭐ suffix when the rule will also
-        // flag the email as important, so the user isn't surprised after
-        // confirming the preview.
+        // Compose the outcome label from the three possibly-orthogonal
+        // effects. Empty target_folder + one of the importance flags is
+        // the "importance-only" case (the rule leaves the LLM's category
+        // decision alone and only overrides the ⭐ flag).
         const targetLabel = folderDisplayLabel(preview.target_folder);
-        $("rule_preview_target").textContent = preview.mark_important
-          ? `${targetLabel}  ⭐ 同时标为重要`
-          : targetLabel;
+        const bits = [];
+        if (targetLabel) {
+          bits.push(targetLabel);
+        } else {
+          bits.push(t("(不改变分类)"));
+        }
+        if (preview.mark_important) bits.push("⭐ " + t("标为重要"));
+        if (preview.unmark_important) bits.push("✗ " + t("取消重要"));
+        $("rule_preview_target").textContent = bits.join("   ");
         const nameEl = $("rule_preview_name");
         if (nameEl) {
           const refList = (preview.refs || []).join(", ");
@@ -4946,12 +5537,13 @@
         const body = JSON.stringify({
           name: preview.name || "",
           nl_text: preview.nl_text,
-          target_folder: preview.target_folder,
+          target_folder: preview.target_folder || "",
           explanation: preview.explanation || "",
           code_preview: preview.code_preview || "",
           program: preview.program,
           refs: preview.refs || [],
           mark_important: !!preview.mark_important,
+          unmark_important: !!preview.unmark_important,
         });
         try {
           if (preview.editing_id) {
@@ -5237,12 +5829,30 @@
         const cards = items
           .map((p, idx) => renderPromptCard(p, idx))
           .join("");
+        // 一键整理 only makes sense with ≥2 prompts. Same access rule as
+        // experiences' organize button — admins always; regular users
+        // if they own at least one prompt in scope.
+        const canOrganizePrompts = items.length >= 2 && (isAdmin() || items.some(
+          (p) => CURRENT_USER && p.user_id === CURRENT_USER.id
+        ));
         wrap.innerHTML = `
           <div class="section-head ${headClass}" onclick="toggleSection('prompts')">
             <span class="section-title">${t("💬 提示")} <span class="section-count">${items.length}</span></span>
             <span class="chev">▼</span>
           </div>
           <div class="section-body ${bodyClass}">
+            ${
+              canOrganizePrompts
+                ? `<div style="margin:8px 0 4px">
+                    <button
+                      class="btn"
+                      id="btn_organize_prompts"
+                      onclick="startOrganizePrompts(event)"
+                      title="${escapeHtml(t("让大模型识别重复/冲突并给出整理方案；执行前会预览"))}"
+                    >${t("🧹 一键整理")}</button>
+                  </div>`
+                : ""
+            }
             ${
               items.length
                 ? cards
@@ -5542,10 +6152,13 @@
           status.textContent = "❗ " + plan.error;
           status.style.color = "var(--danger)";
         } else if (deleteCount === 0 && addCount === 0) {
-          status.textContent = t("经验已经很干净了，没有可整理的项。");
+          const noteSuffix = plan.note ? `  ⚠️ ${plan.note}` : "";
+          status.textContent = t("经验已经很干净了，没有可整理的项。") + noteSuffix;
           status.style.color = "var(--text-muted)";
         } else {
-          status.textContent = `${t("将删除")} ${deleteCount} ${t("条，合并为")} ${addCount} ${t("条新经验。")}`;
+          const noteSuffix = plan.note ? `  ⚠️ ${plan.note}` : "";
+          status.textContent =
+            `${t("将删除")} ${deleteCount} ${t("条，合并为")} ${addCount} ${t("条新经验。")}${noteSuffix}`;
           status.style.color = "var(--text)";
         }
 
@@ -5584,8 +6197,22 @@
           parts.push(`<div style="margin-top:12px;font-size:12px;color:var(--text-muted)">✓ ${keptCount} ${t("条保留不变")}</div>`);
         }
         planBox.innerHTML = parts.join("") || `<div style="color:var(--text-muted)">${t("没有变动。")}</div>`;
-        applyBtn.disabled = plan.error || (deleteCount === 0 && addCount === 0);
-        applyBtn.textContent = t("确认应用");
+        // Swap the confirm button between "apply" (normal) and "retry"
+        // (on LLM/parse error) so the user always has an obvious action.
+        // Leaving a permanently-disabled "确认应用" gives the misleading
+        // impression that the click was lost — exactly the user report.
+        if (plan.error) {
+          applyBtn.disabled = false;
+          applyBtn.textContent = t("🔁 重新分析");
+          applyBtn.onclick = () => {
+            closeOrganizeExperiencesModal();
+            startOrganizeExperiences();
+          };
+        } else {
+          applyBtn.disabled = (deleteCount === 0 && addCount === 0);
+          applyBtn.textContent = t("确认应用");
+          applyBtn.onclick = applyOrganizeExperiences;
+        }
         modal.classList.add("open");
       }
 
@@ -5611,6 +6238,159 @@
             "success"
           );
           closeOrganizeExperiencesModal();
+          await loadPrompts();
+        } catch (err) {
+          setStatus(err.message || t("整理失败"), "error");
+          applyBtn.disabled = false;
+          applyBtn.textContent = t("确认应用");
+        }
+      }
+
+      // Parallel preview/apply flow for the 提示 一键整理 button. Same
+      // shape as the experiences one — separate state + separate modal
+      // so the two organize kinds can never step on each other.
+      let ORGANIZE_PROMPTS_PLAN = null;
+
+      async function startOrganizePrompts(ev) {
+        if (ev && ev.stopPropagation) ev.stopPropagation();
+        const btn = $("btn_organize_prompts");
+        const oldLabel = btn ? btn.textContent : "";
+        if (btn) { btn.disabled = true; btn.textContent = t("分析中…"); }
+        try {
+          const plan = await api("/api/prompts/organize/preview", {
+            method: "POST",
+          });
+          ORGANIZE_PROMPTS_PLAN = plan;
+          openOrganizePromptsModal(plan);
+        } catch (err) {
+          setStatus(err.message || t("整理失败"), "error");
+        } finally {
+          if (btn) { btn.disabled = false; btn.textContent = oldLabel; }
+        }
+      }
+
+      function openOrganizePromptsModal(plan) {
+        const modal = $("organize_prompts_modal");
+        const status = $("organize_prompts_status");
+        const planBox = $("organize_prompts_plan");
+        const applyBtn = $("btn_organize_prompts_apply");
+        // Index of current prompts by id so we can render "before/after"
+        // side by side. PROMPTS_STATE.items is the frontend's authoritative
+        // snapshot at the moment this modal opened.
+        const byId = {};
+        for (const p of PROMPTS_STATE.items || []) byId[p.id] = p;
+
+        const actions = (plan && plan.actions) || [];
+        const drops = actions.filter((a) => a.type === "drop");
+        const merges = actions.filter((a) => a.type === "merge");
+        const keeps = actions.filter((a) => a.type === "keep");
+        const deleteCount = drops.reduce((n, a) => n + a.ids.length, 0)
+                          + merges.reduce((n, a) => n + a.from_ids.length, 0);
+        const addCount = merges.length;
+
+        if (plan.error) {
+          status.textContent = "❗ " + plan.error;
+          status.style.color = "var(--danger)";
+        } else if (deleteCount === 0 && addCount === 0) {
+          const noteSuffix = plan.note ? `  ⚠️ ${plan.note}` : "";
+          status.textContent = t("提示已经很干净了，没有可整理的项。") + noteSuffix;
+          status.style.color = "var(--text-muted)";
+        } else {
+          const noteSuffix = plan.note ? `  ⚠️ ${plan.note}` : "";
+          status.textContent =
+            `${t("将删除")} ${deleteCount} ${t("条，合并为")} ${addCount} ${t("条新提示。")}${noteSuffix}`;
+          status.style.color = "var(--text)";
+        }
+
+        const chip = (label, kind) => {
+          const bg = kind === "target"
+            ? "background:rgba(37,99,235,0.10);color:#1d4ed8"
+            : "background:rgba(107,114,128,0.10);color:#374151";
+          return `<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:11px;margin-right:6px;${bg}">${escapeHtml(label)}</span>`;
+        };
+
+        const parts = [];
+        if (drops.length) {
+          parts.push(`<h4 style="margin:12px 0 6px;font-size:13px">🗑 ${t("将删除")}（${drops.reduce((n,a)=>n+a.ids.length,0)}）</h4>`);
+          for (const a of drops) {
+            for (const pid of a.ids) {
+              const orig = byId[pid];
+              const nameChip = orig && orig.name ? chip("📛 " + orig.name, "name") : "";
+              const tgtChip = orig && orig.target_folder ? chip("→ " + orig.target_folder, "target") : "";
+              parts.push(`
+                <div style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:6px;background:var(--surface-muted)">
+                  <div style="font-size:11px;color:var(--text-subtle);margin-bottom:4px">#${escapeHtml(pid)} ${nameChip}${tgtChip}</div>
+                  <div style="font-size:13px;text-decoration:line-through;color:var(--text-muted);white-space:pre-wrap">${escapeHtml((orig && orig.text) || "(缺失)")}</div>
+                  ${a.reason ? `<div style="font-size:11px;color:var(--text-muted);margin-top:4px">${escapeHtml(t("理由:"))} ${escapeHtml(a.reason)}</div>` : ""}
+                </div>
+              `);
+            }
+          }
+        }
+        if (merges.length) {
+          parts.push(`<h4 style="margin:12px 0 6px;font-size:13px">🔗 ${t("将合并")}（${merges.length}）</h4>`);
+          for (const a of merges) {
+            const originals = a.from_ids.map((i) => {
+              const orig = byId[i];
+              const nameChip = orig && orig.name ? chip("📛 " + orig.name, "name") : "";
+              return `<li style="font-size:12px;color:var(--text-muted);margin-bottom:4px;list-style:none">
+                        ${nameChip}<span style="text-decoration:line-through">${escapeHtml((orig && orig.text) || "(缺失)")}</span>
+                      </li>`;
+            }).join("");
+            const newNameChip = a.new_name ? chip("📛 " + a.new_name, "name") : "";
+            const newTgtChip = a.target_folder ? chip("→ " + a.target_folder, "target") : "";
+            parts.push(`
+              <div style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:6px">
+                <ul style="margin:0 0 8px 0;padding:0">${originals}</ul>
+                <div style="font-size:12px;margin-bottom:4px">${newNameChip}${newTgtChip}</div>
+                <div style="font-size:13px;color:var(--success);white-space:pre-wrap">→ ${escapeHtml(a.new_text)}</div>
+              </div>
+            `);
+          }
+        }
+        if (keeps.length && (drops.length || merges.length)) {
+          const keptCount = keeps.reduce((n, a) => n + a.ids.length, 0);
+          parts.push(`<div style="margin-top:12px;font-size:12px;color:var(--text-muted)">✓ ${keptCount} ${t("条保留不变")}</div>`);
+        }
+        planBox.innerHTML = parts.join("") || `<div style="color:var(--text-muted)">${t("没有变动。")}</div>`;
+
+        if (plan.error) {
+          applyBtn.disabled = false;
+          applyBtn.textContent = t("🔁 重新分析");
+          applyBtn.onclick = () => {
+            closeOrganizePromptsModal();
+            startOrganizePrompts();
+          };
+        } else {
+          applyBtn.disabled = (deleteCount === 0 && addCount === 0);
+          applyBtn.textContent = t("确认应用");
+          applyBtn.onclick = applyOrganizePrompts;
+        }
+        modal.classList.add("open");
+      }
+
+      function closeOrganizePromptsModal() {
+        const m = $("organize_prompts_modal");
+        if (m) m.classList.remove("open");
+        ORGANIZE_PROMPTS_PLAN = null;
+      }
+
+      async function applyOrganizePrompts() {
+        if (!ORGANIZE_PROMPTS_PLAN) { closeOrganizePromptsModal(); return; }
+        const applyBtn = $("btn_organize_prompts_apply");
+        applyBtn.disabled = true;
+        applyBtn.textContent = t("执行中…");
+        try {
+          const res = await api("/api/prompts/organize/apply", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(ORGANIZE_PROMPTS_PLAN),
+          });
+          setStatus(
+            `${t("整理完成:删除")} ${res.deleted} ${t("条，新增")} ${res.merged_into} ${t("条合并结果")}`,
+            "success"
+          );
+          closeOrganizePromptsModal();
           await loadPrompts();
         } catch (err) {
           setStatus(err.message || t("整理失败"), "error");
@@ -6724,7 +7504,11 @@
             el.oncontextmenu = (e) => {
               const canAdd = el.dataset.canAddChild === "1";
               const canDelete = el.dataset.canDelete === "1";
-              if (!canAdd && !canDelete) return;
+              // Reclassify makes sense for any inbox-flavored folder
+              // (built-in labels like ⭐重要 / 未分类 / 垃圾邮件 and
+              // every user folder), but not for sent / drafts / trash.
+              const canReclassify = canReclassifyFolder(el.dataset.key);
+              if (!canAdd && !canDelete && !canReclassify) return;
               e.preventDefault();
               selectFolder(el.dataset.key);
               openFolderContextMenu(
@@ -6732,7 +7516,8 @@
                 e.clientY,
                 el.dataset.key,
                 canAdd,
-                canDelete
+                canDelete,
+                canReclassify
               );
             };
           });
@@ -6742,15 +7527,28 @@
         setupFolderReorderDrag($("folder_list"));
       }
 
-      function openFolderContextMenu(x, y, folderPath, canAdd, canDelete) {
+      function canReclassifyFolder(key) {
+        if (!key) return false;
+        // sent / drafts / trash are not classifiable — no rules /
+        // prompts / experiences apply to them. Every other folder
+        // (built-in inbox labels + user folders) is fair game.
+        return folderKind(key) === "inbox";
+      }
+
+      function openFolderContextMenu(x, y, folderPath, canAdd, canDelete, canReclassify) {
         const menu = $("folder_context_menu");
         const addBtn = $("folder_menu_add");
         const delBtn = $("folder_menu_delete");
-        if (!menu || !addBtn || !delBtn) return;
+        const reclBtn = $("folder_menu_reclassify");
+        if (!menu || !addBtn || !delBtn || !reclBtn) return;
 
-        FOLDER_MENU_STATE = { folderPath, canAdd, canDelete };
+        FOLDER_MENU_STATE = { folderPath, canAdd, canDelete, canReclassify };
         addBtn.disabled = !canAdd;
+        addBtn.style.display = canAdd ? "" : "none";
         delBtn.disabled = !canDelete;
+        delBtn.style.display = canDelete ? "" : "none";
+        reclBtn.disabled = !canReclassify;
+        reclBtn.style.display = canReclassify ? "" : "none";
 
         const margin = 8;
         menu.classList.add("open");
@@ -6961,8 +7759,9 @@
         sub.style.display = "flex";
         if (payload.kind === "move") {
           const cats = getMoveCategories();
+          const bulkMode = !!payload.bulk;
           for (const c of cats) {
-            const isCurrent = c.key === payload.currentCategory;
+            const isCurrent = !bulkMode && c.key === payload.currentCategory;
             const btn = document.createElement("button");
             btn.type = "button";
             btn.className = "move-target";
@@ -6975,7 +7774,11 @@
               btn.onclick = () => {
                 const target = c.key;
                 closeMailContextMenu();
-                moveEmailTo(payload.item, target);
+                if (bulkMode && Array.isArray(payload.items)) {
+                  bulkMoveTo(payload.items, target);
+                } else {
+                  moveEmailTo(payload.item, target);
+                }
               };
             }
             sub.appendChild(btn);
@@ -7079,6 +7882,10 @@
             label: "📁 移动到",
             submenu: { kind: "move", item, currentCategory: item.category },
           });
+          out.push({
+            label: t("🧠 重新智能分类"),
+            action: () => reclassifySingleEmail(item),
+          });
           out.push({ sep: true });
           out.push({
             label: t("🗑 删除"),
@@ -7137,6 +7944,7 @@
       function setupFolderContextMenu() {
         const addBtn = $("folder_menu_add");
         const delBtn = $("folder_menu_delete");
+        const reclBtn = $("folder_menu_reclassify");
         if (addBtn) {
           addBtn.onclick = async () => {
             const target = FOLDER_MENU_STATE;
@@ -7153,6 +7961,60 @@
             await deleteFolder(target.folderPath);
           };
         }
+        if (reclBtn) {
+          reclBtn.onclick = async () => {
+            const target = FOLDER_MENU_STATE;
+            if (!target || !target.canReclassify) return;
+            const folderPath = target.folderPath;
+            closeFolderContextMenu();
+            await reclassifyFolderScope(folderPath);
+          };
+        }
+      }
+
+      // Kicks off a scoped 重新分类 task via the task-registry: same
+      // background-thread machinery as 全量重新分类, just with a filter
+      // that limits work to this folder. Progress + pause / cancel are
+      // driven by the standard task modal.
+      async function reclassifyFolderScope(folderPath) {
+        if (!folderPath || !canReclassifyFolder(folderPath)) return;
+        // Map the sidebar key to the request the backend expects.
+        let scope, folder, humanName;
+        if (folderPath === "__important__") {
+          scope = "important";
+          folder = "";
+          humanName = "⭐ 重要邮件";
+        } else if (folderPath === "__formerly_important__") {
+          scope = "formerly_important";
+          folder = "";
+          humanName = "曾经重要";
+        } else if (folderPath === "__all__" || !folderPath) {
+          scope = "folder";
+          folder = "__all__";
+          humanName = "全部收件";
+        } else {
+          scope = "folder";
+          folder = folderPath;
+          humanName = folderPath;
+        }
+        const msg = `即将对「${humanName}」下的所有邮件按最新规则/提示/经验重新分类。\n\n` +
+          `注意:执行前会清空每封邮件的「分类目录」和「重要」标签,再按当前规则重新判定。\n` +
+          `这一过程可能耗时较长(每封邮件一次 LLM 调用),已配备暂停/取消按钮。\n\n` +
+          `确定继续吗?`;
+        if (!window.confirm(msg)) return;
+        await TaskPoll.start("/api/tasks/reclassify-scope/start", {
+          body: { scope, folder },
+          onDone: (info) => {
+            const r = info.result || {};
+            const total = r.total ?? 0;
+            const changed = r.changed ?? 0;
+            const skipCount = r.skipped ?? 0;
+            let out = `重新分类完成:共处理 ${total} 封,分类发生变化 ${changed} 封`;
+            if (skipCount) out += `，跳过 ${skipCount} 封`;
+            setStatus(out, skipCount ? "error" : "success");
+            refreshAll().catch(() => {});
+          },
+        });
       }
 
       // Drag-to-reorder. Uses a distinct MIME (text/x-xemail-folder) so the
@@ -7285,9 +8147,9 @@
           return;
         }
         el.addEventListener("dragover", (e) => {
-          // Only respond to our internal mail-item drag.
+          // Only respond to our internal mail-item drag (single or batch).
           const types = Array.from(e.dataTransfer.types || []);
-          if (!types.includes("text/x-xemail-id")) return;
+          if (!types.includes("text/x-xemail-id") && !types.includes("text/x-xemail-ids")) return;
           e.preventDefault();
           e.dataTransfer.dropEffect = "move";
           el.classList.add("drop-target");
@@ -7303,17 +8165,42 @@
         el.addEventListener("drop", (e) => {
           e.preventDefault();
           el.classList.remove("drop-target");
-          const id =
-            e.dataTransfer.getData("text/x-xemail-id") ||
-            e.dataTransfer.getData("text/plain");
-          if (!id) return;
-          const item = allEmails.find((x) => x.id === id);
-          if (!item) return;
-          if (item.category === key) {
-            setStatus(`邮件已在「${folderDisplayName(key)}」中`, "info");
+          // Prefer the batch payload — if present, it holds every
+          // selected email id and takes precedence over the single-id
+          // fallback (which is set as a compatibility copy).
+          const idsBlob = e.dataTransfer.getData("text/x-xemail-ids");
+          let ids = [];
+          if (idsBlob) {
+            try { ids = JSON.parse(idsBlob); } catch (_) { ids = []; }
+          }
+          if (!Array.isArray(ids) || ids.length === 0) {
+            const singleId =
+              e.dataTransfer.getData("text/x-xemail-id") ||
+              e.dataTransfer.getData("text/plain");
+            if (singleId) ids = [singleId];
+          }
+          if (ids.length === 0) return;
+          // Resolve to concrete records in allEmails.
+          const items = ids
+            .map((id) => allEmails.find((x) => x.id === id))
+            .filter(Boolean);
+          if (items.length === 0) return;
+          if (items.length === 1) {
+            const item = items[0];
+            if (item.category === key) {
+              setStatus(`邮件已在「${folderDisplayName(key)}」中`, "info");
+              return;
+            }
+            moveEmailTo(item, key);
             return;
           }
-          moveEmailTo(item, key);
+          // 2+ emails → bulk move. Skip any already in the destination.
+          const toMove = items.filter((x) => x.category !== key);
+          if (toMove.length === 0) {
+            setStatus(`${items.length} 封邮件都已在「${folderDisplayName(key)}」中`, "info");
+            return;
+          }
+          bulkMoveTo(toMove, key);
         });
       }
 
@@ -7756,17 +8643,784 @@
       }
 
       function applySearch(list, kind) {
-        const keyword = (MAIL_SEARCH.keyword || "").trim().toLowerCase();
-        if (!keyword) return list;
+        // Two orthogonal filters:
+        //   1. AI_SEARCH — a "result set" filter, backed by a per-email
+        //      LLM judgment task. When active, only rows in
+        //      AI_SEARCH_STATE.matched_ids survive (thread-merged rows
+        //      pass if ANY inner id matches).
+        //   2. MAIL_SEARCH — the classic keyword filter (fulltext /
+        //      participants / subject).
+        // They compose: AI first, then keyword on top. That way the
+        // user can further narrow a big AI result set by typing.
+        let filtered = list;
+        if (AI_SEARCH_STATE && AI_SEARCH_STATE.active) {
+          const hits = AI_SEARCH_STATE.matched_ids;
+          filtered = filtered.filter((item) => {
+            if (!item) return false;
+            if (hits.has(item.id)) return true;
+            if (kind === "inbox" && item.__merged && Array.isArray(item.__threadItems)) {
+              return item.__threadItems.some((x) => hits.has(x.id));
+            }
+            return false;
+          });
+        }
 
-        const scope = MAIL_SEARCH.scope || "fulltext";
-        const filtered = list.filter((item) =>
-          buildSearchText(item, kind, scope).toLowerCase().includes(keyword)
-        );
+        const keyword = (MAIL_SEARCH.keyword || "").trim().toLowerCase();
+        if (keyword) {
+          const scope = MAIL_SEARCH.scope || "fulltext";
+          filtered = filtered.filter((item) =>
+            buildSearchText(item, kind, scope).toLowerCase().includes(keyword)
+          );
+        }
         filtered.sort((a, b) =>
           getItemTime(b, kind).localeCompare(getItemTime(a, kind))
         );
         return filtered;
+      }
+
+      // ============================================================
+      // Multi-select: track a Set of selected email ids across the
+      // current visible list. Click semantics mirror macOS Finder /
+      // most email clients:
+      //   • plain click        → single-select (opens detail); clears set
+      //   • Cmd/Ctrl + click   → toggle this row in the set
+      //   • Shift + click      → extend set from anchor to this row
+      //   • right-click on a selected row (when |set|>1) → batch menu
+      //   • right-click on non-selected row → set becomes just that row
+      // ============================================================
+      const Selection = (() => {
+        const ids = new Set();
+        let anchor = null;
+
+        function has(id) { return ids.has(id); }
+        function count() { return ids.size; }
+        function all() { return Array.from(ids); }
+        function clear() {
+          ids.clear();
+          anchor = null;
+          renderSelectionBar();
+        }
+        function set(id) {
+          ids.clear();
+          if (id) ids.add(id);
+          anchor = id || null;
+          renderSelectionBar();
+        }
+        function toggle(id) {
+          if (!id) return;
+          if (ids.has(id)) ids.delete(id);
+          else ids.add(id);
+          anchor = id;
+          renderSelectionBar();
+        }
+        function extendTo(id, visibleList) {
+          if (!id || !visibleList || visibleList.length === 0) return;
+          const rowIds = visibleList.map((x) => x.id);
+          const toIdx = rowIds.indexOf(id);
+          if (toIdx < 0) return;
+          let fromIdx = anchor ? rowIds.indexOf(anchor) : -1;
+          if (fromIdx < 0) fromIdx = toIdx;
+          const [lo, hi] = fromIdx <= toIdx ? [fromIdx, toIdx] : [toIdx, fromIdx];
+          for (let i = lo; i <= hi; i++) ids.add(rowIds[i]);
+          renderSelectionBar();
+        }
+        function resolveItems(visibleList) {
+          // Return live records for whatever's in the set. Callers
+          // pass their local `list` so the resolution matches what's
+          // actually on screen (respects merge-view, search filters, etc.).
+          const byId = new Map();
+          for (const item of visibleList) {
+            if (item && item.id) byId.set(item.id, item);
+            // Merged rows expose members via __threadItems; index each
+            // inner id too so a member click still finds the merged row.
+            if (item && item.__merged && Array.isArray(item.__threadItems)) {
+              for (const inner of item.__threadItems) {
+                if (inner && inner.id && !byId.has(inner.id)) {
+                  byId.set(inner.id, inner);
+                }
+              }
+            }
+          }
+          return all()
+            .map((id) => byId.get(id))
+            .filter(Boolean);
+        }
+        return { has, count, all, clear, set, toggle, extendTo, resolveItems };
+      })();
+
+      // Renders the "N 已选 · 清除" bar above the list body. Only shown
+      // when 2+ rows are selected (single selection = the default
+      // "opened row" mode).
+      function renderSelectionBar() {
+        // Body is inside .list-pane; place the bar as its previous sibling.
+        const body = $("list_body");
+        if (!body) return;
+        let bar = document.getElementById("selection_bar");
+        const n = Selection.count();
+        if (n < 2) {
+          if (bar) bar.remove();
+          // Refresh row highlights.
+          body.querySelectorAll(".mail-item").forEach((el) => {
+            el.classList.toggle("selected", Selection.has(el.dataset.id));
+          });
+          return;
+        }
+        if (!bar) {
+          bar = document.createElement("div");
+          bar.id = "selection_bar";
+          bar.className = "selection-bar";
+          body.parentNode.insertBefore(bar, body);
+        }
+        bar.innerHTML = `
+          <span>${t("已选")} <strong>${n}</strong> ${t("封邮件")}</span>
+          <span style="display:flex;gap:12px;align-items:center">
+            <button type="button" class="link-btn" onclick="Selection.clear()">${t("清除选择")}</button>
+          </span>
+        `;
+        // Refresh row highlights.
+        body.querySelectorAll(".mail-item").forEach((el) => {
+          el.classList.toggle("selected", Selection.has(el.dataset.id));
+        });
+      }
+
+      // ============================================================
+      // AI-powered semantic search: user describes what they want,
+      // picks a date range, and the backend runs a task that
+      // LLM-judges every email in that range. When the task
+      // completes, its `result.matched_ids` becomes an active filter
+      // on the visible list (via applySearch above).
+      // ============================================================
+      let AI_SEARCH_STATE = null;  // { active: bool, query, matched_ids: Set }
+
+      function openAiSearchModal() {
+        const m = $("ai_search_modal");
+        if (!m) return;
+        const startEl = $("ai_search_start");
+        const endEl = $("ai_search_end");
+        // Default range: last 30 days ending today. Only fill in if empty
+        // so re-opening the modal preserves the user's last choice.
+        if (startEl && !startEl.value) {
+          const d = new Date();
+          d.setDate(d.getDate() - 30);
+          startEl.value = _isoDate(d);
+        }
+        if (endEl && !endEl.value) {
+          endEl.value = _isoDate(new Date());
+        }
+        _populateAiSearchScopeOptions();
+        $("ai_search_status").textContent = "";
+        m.classList.add("open");
+        setTimeout(() => $("ai_search_query")?.focus(), 30);
+      }
+
+      // Build the scope <select>: 全部文件夹 + 重要 / 曾经重要 special
+      // labels + every real user folder + built-in inbox labels
+      // (未分类 / 垃圾邮件). If the user opened the modal while
+      // already viewing a specific folder / label, pre-select that
+      // as the scope — matches "I'm looking around HERE, search HERE"
+      // muscle memory.
+      function _populateAiSearchScopeOptions() {
+        const sel = $("ai_search_scope");
+        if (!sel) return;
+        // Preserve prior selection across re-opens.
+        const prev = sel.value || "";
+        const opts = [];
+        opts.push({ value: "__all__", label: t("全部文件夹") });
+        opts.push({ value: "__important__", label: "⭐ " + t("重要") });
+        opts.push({ value: "__formerly_important__", label: t("曾经重要") });
+        const folders = PROMPTS_STATE.available_folders || [];
+        // Match order: system-defined folders first (未分类 / 垃圾邮件 already
+        // in available_folders), then user folders. Do NOT include sent /
+        // drafts / trash — they aren't classifiable and the backend refuses
+        // anyway.
+        for (const f of folders) opts.push({ value: f, label: "📁 " + f });
+        // Prefer keeping the user's prior pick; else default to whatever
+        // folder they were browsing when they clicked the button.
+        let defaultPick = "";
+        if (prev) defaultPick = prev;
+        else if (currentFolder && folderKind(currentFolder) === "inbox") {
+          defaultPick = currentFolder;
+        } else {
+          defaultPick = "__all__";
+        }
+        // If defaultPick isn't in the options set (e.g. deleted folder),
+        // fall back to __all__.
+        if (!opts.some((o) => o.value === defaultPick)) defaultPick = "__all__";
+        sel.innerHTML = opts
+          .map(
+            (o) =>
+              `<option value="${escapeHtml(o.value)}" ${
+                o.value === defaultPick ? "selected" : ""
+              }>${escapeHtml(o.label)}</option>`
+          )
+          .join("");
+      }
+
+      // Given a scope pick, return the folder key the frontend should
+      // display when results land. For a real folder we drop straight
+      // there; for special labels we jump to that label; for "all"
+      // we go to 「全部」.
+      function _aiSearchDisplayFolder(scopeKind, scopeFolder) {
+        if (scopeKind === "important") return "__important__";
+        if (scopeKind === "formerly_important") return "__formerly_important__";
+        if (scopeKind === "folder" && scopeFolder && scopeFolder !== "__all__") {
+          return scopeFolder;
+        }
+        return "__all__";
+      }
+
+      function _aiSearchScopeLabel(scopeKind, scopeFolder) {
+        if (scopeKind === "important") return "⭐ " + t("重要");
+        if (scopeKind === "formerly_important") return t("曾经重要");
+        if (scopeKind === "folder" && scopeFolder && scopeFolder !== "__all__") {
+          return scopeFolder;
+        }
+        return t("全部文件夹");
+      }
+
+      function closeAiSearchModal() {
+        const m = $("ai_search_modal");
+        if (m) m.classList.remove("open");
+      }
+
+      function _isoDate(d) {
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, "0");
+        const day = String(d.getDate()).padStart(2, "0");
+        return `${y}-${m}-${day}`;
+      }
+
+      async function startAiSearch() {
+        const q = ($("ai_search_query")?.value || "").trim();
+        const start = ($("ai_search_start")?.value || "").trim();
+        const end = ($("ai_search_end")?.value || "").trim();
+        const scopeSel = ($("ai_search_scope")?.value || "__all__").trim();
+        const status = $("ai_search_status");
+        if (!q) {
+          if (status) { status.textContent = t("请输入检索需求"); status.style.color = "var(--danger)"; }
+          $("ai_search_query")?.focus();
+          return;
+        }
+        if (start && end && start > end) {
+          if (status) { status.textContent = t("起始日期不能晚于截止日期"); status.style.color = "var(--danger)"; }
+          return;
+        }
+        // Translate the sidebar-style key we render in the <select>
+        // into the backend's request shape (kind + optional folder).
+        let scopeKind, scopeFolder;
+        if (scopeSel === "__important__") { scopeKind = "important"; scopeFolder = ""; }
+        else if (scopeSel === "__formerly_important__") { scopeKind = "formerly_important"; scopeFolder = ""; }
+        else if (!scopeSel || scopeSel === "__all__") { scopeKind = "folder"; scopeFolder = "__all__"; }
+        else { scopeKind = "folder"; scopeFolder = scopeSel; }
+        closeAiSearchModal();
+        await TaskPoll.start("/api/tasks/ai-search/start", {
+          body: {
+            query: q,
+            start_date: start,
+            end_date: end,
+            scope_kind: scopeKind,
+            scope_folder: scopeFolder,
+          },
+          onDone: (info) => {
+            // Only "done" is a successful completion. cancelled / error
+            // must NOT install an AI filter — otherwise the frontend
+            // gets stuck showing an empty list forever (empty
+            // matched_ids ∩ any folder = nothing visible).
+            if (!info || info.status !== "done") {
+              const label =
+                info && info.status === "cancelled" ? t("智能检索已取消") :
+                info && info.status === "error"     ? t("智能检索失败") :
+                t("智能检索未完成");
+              setStatus(label, info && info.status === "error" ? "error" : "info");
+              return;
+            }
+            const r = info.result || {};
+            const ids = Array.isArray(r.matched_ids) ? r.matched_ids : [];
+            const matchedSet = new Set(ids);
+            AI_SEARCH_STATE = {
+              active: true,
+              query: q,
+              matched_ids: matchedSet,
+              total_checked: r.total ?? 0,
+              scope_kind: scopeKind,
+              scope_folder: scopeFolder,
+            };
+            // Move the visible folder to the search scope so results
+            // are all reachable. For "all", jump to 「全部」;
+            // for a specific folder / label, jump to that folder.
+            const scopeView = _aiSearchDisplayFolder(scopeKind, scopeFolder);
+            currentFolder = scopeView;
+            currentEmailId = null;
+            currentThreadKey = null;
+            renderFolders();
+            renderList();
+            renderDetail(null);
+            setStatus(
+              `${t("智能检索完成:")} ${matchedSet.size}/${r.total ?? 0} ${t("封邮件命中")}`,
+              matchedSet.size > 0 ? "success" : "info"
+            );
+          },
+        });
+      }
+
+      function exitAiSearch() {
+        AI_SEARCH_STATE = null;
+        renderList();
+        setStatus(t("已退出智能检索"), "info");
+      }
+
+      function renderAiSearchBar() {
+        const body = $("list_body");
+        if (!body) return;
+        let bar = document.getElementById("aisearch_bar");
+        if (!AI_SEARCH_STATE || !AI_SEARCH_STATE.active) {
+          if (bar) bar.remove();
+          return;
+        }
+        if (!bar) {
+          bar = document.createElement("div");
+          bar.id = "aisearch_bar";
+          bar.className = "aisearch-bar";
+          body.parentNode.insertBefore(bar, body);
+        }
+        const hits = AI_SEARCH_STATE.matched_ids.size;
+        const total = AI_SEARCH_STATE.total_checked || 0;
+        const q = AI_SEARCH_STATE.query || "";
+        const qShort = q.length > 40 ? q.slice(0, 40) + "…" : q;
+        // Scope hint that matches the pick the user made in the modal.
+        // If they've since navigated to a DIFFERENT folder than the
+        // scope, tell them so they can spot "the hit count doesn't
+        // match what I see" instantly.
+        const state = AI_SEARCH_STATE;
+        const scopeLabel = _aiSearchScopeLabel(state.scope_kind, state.scope_folder);
+        const displayFolder = _aiSearchDisplayFolder(state.scope_kind, state.scope_folder);
+        const inScopeView = currentFolder === displayFolder;
+        const noteBase = t("范围: ") + scopeLabel;
+        const scopeNote = inScopeView
+          ? `(${noteBase})`
+          : `(${noteBase} · ${t("已切到其他文件夹,当前视图只显示落在该文件夹中的命中")})`;
+        bar.innerHTML = `
+          <span>${t("🧠 智能检索:")} <em>「${escapeHtml(qShort)}」</em> · ${t("命中")} <strong>${hits}</strong>/${total} <span style="color:var(--text-muted)">${escapeHtml(scopeNote)}</span></span>
+          <button type="button" class="link-btn" onclick="exitAiSearch()">${t("退出智能检索")}</button>
+        `;
+      }
+
+      // ============================================================
+      // Bulk right-click menu: same visual as the single-row menu but
+      // only shows batch-safe actions (see analysis in the CLAUDE.md
+      // multi-select notes). Reuses the same #mail_context_menu DOM
+      // element as the single-row menu — this is a rebuild rather
+      // than a separate popup, so keyboard focus / dismissal wiring
+      // stays uniform.
+      // ============================================================
+      function buildBulkMailContextItems(items, kind) {
+        const out = [];
+        const n = items.length;
+        if (kind === "inbox") {
+          // Reply-to-multiple: build the sender list from `from_email`
+          // of every selected item (dedup), open compose in
+          // "independent send" mode by default. The recipient list
+          // per-copy will be just one sender at a time. Subject/body
+          // are blank; the user types what they want to say once and
+          // the backend fans out.
+          const senders = _collectSendersForBulkReply(items);
+          if (senders.length > 0) {
+            out.push({
+              label: `${t("↩ 回复多封邮件")} (${senders.length} ${t("个发件人")})`,
+              action: () => bulkReplyToMultiple(items, senders),
+            });
+            out.push({ sep: true });
+          }
+          // Importance: if EVERY row is important, offer "取消重要";
+          // otherwise offer "标为重要" (applied to those still without).
+          const anyImportant = items.some((x) => x.important);
+          const allImportant = items.every((x) => x.important);
+          out.push({
+            label: allImportant
+              ? `${t("★ 取消重要")} (${n})`
+              : `${t("☆ 标为重要")} (${n})`,
+            action: () => bulkToggleImportant(items, !allImportant),
+          });
+          // 已处理 only makes sense when at least one is currently important + unhandled.
+          if (anyImportant) {
+            out.push({
+              label: `${t("✓ 已处理")} (${items.filter((x) => x.important && !x.handled).length})`,
+              action: () => bulkMarkHandled(items),
+            });
+          }
+          const allPinned = items.every((x) => x.pinned);
+          out.push({
+            label: allPinned
+              ? `${t("取消置顶")} (${n})`
+              : `${t("📌 置顶")} (${n})`,
+            action: () => bulkTogglePin(items, !allPinned),
+          });
+          const allRead = items.every((x) => x.read);
+          out.push({
+            label: allRead
+              ? `${t("✉ 标记为未读")} (${n})`
+              : `${t("✉ 标记为已读")} (${n})`,
+            action: () => bulkToggleRead(items, !allRead),
+          });
+          out.push({ sep: true });
+          out.push({
+            label: `${t("📁 移动到")} (${n})`,
+            submenu: { kind: "move", items, bulk: true, currentCategory: null },
+          });
+          out.push({
+            label: `${t("🧠 重新智能分类")} (${n})`,
+            action: () => bulkReclassify(items),
+          });
+          out.push({ sep: true });
+          out.push({
+            label: `${t("🗑 删除")} (${n})`,
+            danger: true,
+            action: () => bulkTrash(items),
+          });
+        } else if (kind === "sent") {
+          out.push({
+            label: `${t("🗑 删除")} (${n})`,
+            danger: true,
+            action: () => bulkDeleteSent(items),
+          });
+        } else if (kind === "draft") {
+          out.push({
+            label: `${t("🗑 删除草稿")} (${n})`,
+            danger: true,
+            action: () => bulkDeleteDrafts(items),
+          });
+        } else if (kind === "trash") {
+          out.push({
+            label: `${t("↩ 恢复")} (${n})`,
+            action: () => bulkRestore(items),
+          });
+          out.push({
+            label: `${t("🗑 彻底删除")} (${n})`,
+            danger: true,
+            action: () => bulkPermanentlyDelete(items),
+          });
+        }
+        return out;
+      }
+
+      function openBulkMailContextMenu(x, y, items, kind) {
+        const menu = $("mail_context_menu");
+        const main = $("mail_context_main");
+        const sub = $("mail_context_submenu");
+        if (!menu || !main || !sub || !items || items.length === 0) return;
+
+        main.innerHTML = "";
+        sub.innerHTML = "";
+        sub.style.display = "none";
+
+        // A short header showing "N 已选" so the batch mode is obvious.
+        const header = document.createElement("div");
+        header.className = "mcm-sep";
+        header.style.cssText = "padding:6px 10px;font-size:11px;color:var(--text-muted);border-bottom:1px solid var(--border);background:rgba(37,99,235,0.06)";
+        header.textContent = `${t("已选 ")} ${items.length} ${t("封 · 批量操作")}`;
+        main.appendChild(header);
+
+        const menuItems = buildBulkMailContextItems(items, kind);
+        for (const it of menuItems) {
+          if (it.sep) {
+            const s = document.createElement("div");
+            s.className = "mcm-sep";
+            main.appendChild(s);
+            continue;
+          }
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "mcm-btn" + (it.danger ? " danger" : "");
+          btn.textContent = it.label;
+          if (it.submenu) {
+            btn.innerHTML = `<span>${it.label}</span><span class="chev">▸</span>`;
+            const openSub = () => {
+              main.querySelectorAll("button.open-sub")
+                .forEach((b) => b.classList.remove("open-sub"));
+              btn.classList.add("open-sub");
+              buildMailContextSubmenu(sub, it.submenu);
+            };
+            btn.onmouseenter = openSub;
+            btn.onclick = openSub;
+          } else {
+            btn.innerHTML = `<span>${it.label}</span>`;
+            btn.onmouseenter = () => {
+              sub.style.display = "none";
+              main.querySelectorAll("button.open-sub")
+                .forEach((b) => b.classList.remove("open-sub"));
+            };
+            btn.onclick = async () => {
+              closeMailContextMenu();
+              try { await it.action(); } catch (err) {
+                setStatus(err.message || String(err), "error");
+              }
+            };
+          }
+          main.appendChild(btn);
+        }
+
+        // Positioning: reuse the same clamping logic as the single menu.
+        const margin = 8;
+        menu.classList.add("open");
+        menu.style.left = "0px";
+        menu.style.top = "0px";
+        const rect = menu.getBoundingClientRect();
+        const maxX = window.innerWidth - rect.width - margin;
+        const maxY = window.innerHeight - rect.height - margin;
+        menu.style.left = `${Math.max(margin, Math.min(x, maxX))}px`;
+        menu.style.top = `${Math.max(margin, Math.min(y, maxY))}px`;
+      }
+
+      // ============================================================
+      // Batch action implementations. Each iterates the selected items
+      // (typically in small parallel batches) and calls the same
+      // per-email endpoint used by the single-row action.  Guiding
+      // principle: never move faster than the DB can handle, and keep
+      // the UI responsive by refreshing state in one shot at the end.
+      // ============================================================
+      async function _bulkApplyUpdate(items, patchFn, statusMsg) {
+        const CONCURRENCY = 5;
+        let idx = 0;
+        let done = 0;
+        let failed = 0;
+        async function worker() {
+          while (idx < items.length) {
+            const my = idx++;
+            const item = items[my];
+            try {
+              const patch = patchFn(item);
+              if (patch === null) { continue; }
+              const updated = await applyEmailUpdate(item, patch);
+              if (updated) done++; else failed++;
+            } catch (_) { failed++; }
+          }
+        }
+        await Promise.all(Array.from({length: Math.min(CONCURRENCY, items.length)}, worker));
+        Selection.clear();
+        setStatus(
+          `${statusMsg}: ${done}/${items.length}${failed ? ` · ${failed} 失败` : ""}`,
+          failed ? "error" : "success"
+        );
+        renderFolders();
+        renderList();
+      }
+
+      async function bulkToggleImportant(items, markVal) {
+        // Expand merged-inbox rows to their underlying members so
+        // "important on merged" affects every constituent, not just
+        // the representative id.
+        const expanded = _expandMergedInboxMembers(items);
+        return _bulkApplyUpdate(
+          expanded,
+          (it) => (!!it.important === markVal ? null : { important: markVal }),
+          markVal ? t("已批量标为重要") : t("已批量取消重要"),
+        );
+      }
+      async function bulkMarkHandled(items) {
+        // Only rows that are important+unhandled — matches the
+        // single-row "已处理" semantic.
+        const targets = _expandMergedInboxMembers(items).filter(
+          (x) => x.important && !x.handled && x.__record_type !== "sent"
+        );
+        if (targets.length === 0) {
+          setStatus(t("没有需要标为「已处理」的邮件"), "info");
+          return;
+        }
+        return _bulkApplyUpdate(
+          targets,
+          () => ({ handled: true }),
+          t("已批量标为已处理"),
+        );
+      }
+      async function bulkTogglePin(items, pinVal) {
+        return _bulkApplyUpdate(
+          items,
+          (it) => (!!it.pinned === pinVal ? null : { pinned: pinVal }),
+          pinVal ? t("已批量置顶") : t("已批量取消置顶"),
+        );
+      }
+      async function bulkToggleRead(items, readVal) {
+        return _bulkApplyUpdate(
+          _expandMergedInboxMembers(items),
+          (it) => (!!it.read === readVal ? null : { read: readVal }),
+          readVal ? t("已批量标为已读") : t("已批量标为未读"),
+        );
+      }
+      async function bulkMoveTo(items, category) {
+        if (!category) return;
+        return _bulkApplyUpdate(
+          items,
+          (it) => (it.category === category ? null : { category }),
+          `${t("已批量移动到")} ${category}`,
+        );
+      }
+      async function bulkTrash(items) {
+        if (!window.confirm(`${t("确定要删除选中的")} ${items.length} ${t("封邮件吗?")}`)) return;
+        return _bulkApplyUpdate(
+          items,
+          () => ({ deleted: true }),
+          t("已批量删除"),
+        );
+      }
+      async function bulkRestore(items) {
+        return _bulkApplyUpdate(
+          items,
+          () => ({ deleted: false }),
+          t("已批量恢复"),
+        );
+      }
+      async function bulkPermanentlyDelete(items) {
+        if (!window.confirm(`${t("确定要彻底删除选中的")} ${items.length} ${t("封邮件吗? 此操作不可恢复。")}`)) return;
+        let done = 0, failed = 0;
+        for (const item of items) {
+          try {
+            const isSent = item.__record_type === "sent";
+            const url = isSent ? `/api/sent/${encodeURIComponent(item.id)}` : `/api/emails/${encodeURIComponent(item.id)}`;
+            await api(url, { method: "DELETE" });
+            done++;
+          } catch (_) { failed++; }
+        }
+        Selection.clear();
+        await refreshAll();
+        setStatus(`${t("彻底删除完成:")} ${done}/${items.length}${failed ? ` · ${failed} 失败` : ""}`,
+          failed ? "error" : "success");
+      }
+      async function bulkDeleteSent(items) {
+        if (!window.confirm(`${t("确定要删除")} ${items.length} ${t("封已发送邮件? 会移入回收站。")}`)) return;
+        let done = 0, failed = 0;
+        for (const item of items) {
+          try {
+            await api(`/api/sent/${encodeURIComponent(item.id)}/update`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ deleted: true }),
+            });
+            done++;
+          } catch (_) { failed++; }
+        }
+        Selection.clear();
+        await refreshAll();
+        setStatus(`${t("已批量删除:")} ${done}/${items.length}${failed ? ` · ${failed} 失败` : ""}`,
+          failed ? "error" : "success");
+      }
+      async function bulkDeleteDrafts(items) {
+        if (!window.confirm(`${t("确定要删除")} ${items.length} ${t("份草稿? 不可恢复。")}`)) return;
+        let done = 0, failed = 0;
+        for (const item of items) {
+          try {
+            await api(`/api/drafts/${encodeURIComponent(item.id)}`, { method: "DELETE" });
+            done++;
+          } catch (_) { failed++; }
+        }
+        Selection.clear();
+        await refreshAll();
+        setStatus(`${t("已批量删除草稿:")} ${done}/${items.length}${failed ? ` · ${failed} 失败` : ""}`,
+          failed ? "error" : "success");
+      }
+      async function bulkReclassify(items) {
+        // Reuse the reclassify-scope task with explicit ids scope.
+        // Fall back to iterating per-email if the batch would exceed
+        // a reasonable size — kept simple: for now always iterate,
+        // because the per-email endpoint updates the trace properly
+        // and the task framework only runs one task at a time.
+        if (!window.confirm(`${t("将对选中的")} ${items.length} ${t("封邮件按最新规则/提示/经验重新分类。此过程会清空并重设分类与「重要」标签。确定继续?")}`)) return;
+        const ids = _expandMergedInboxMembers(items).map((x) => x.id).filter(Boolean);
+        if (ids.length === 0) return;
+        const CONCURRENCY = 5;
+        let idx = 0, done = 0, failed = 0, changed = 0;
+        let toastTimer = null;
+        const showToast = () => {
+          setStatus(`${t("重新分类中")} ${done}/${ids.length}${failed ? ` · ${failed} 失败` : ""}`, "info");
+        };
+        async function worker() {
+          while (idx < ids.length) {
+            const my = idx++;
+            const id = ids[my];
+            try {
+              const updated = await api(`/api/emails/${encodeURIComponent(id)}/reclassify`, { method: "POST" });
+              const localIdx = allEmails.findIndex((e) => e.id === id);
+              const oldCat = localIdx >= 0 ? (allEmails[localIdx].category || "") : "";
+              if (localIdx >= 0) allEmails[localIdx] = { ...allEmails[localIdx], ...updated };
+              if ((updated.category || "") !== oldCat) changed++;
+              done++;
+            } catch (_) { failed++; }
+            if (!toastTimer) {
+              toastTimer = setTimeout(() => { toastTimer = null; showToast(); }, 250);
+            }
+          }
+        }
+        await Promise.all(Array.from({length: Math.min(CONCURRENCY, ids.length)}, worker));
+        Selection.clear();
+        renderFolders();
+        renderList();
+        setStatus(`${t("批量重新分类完成:")} ${done}/${ids.length} · ${t("分类变化")} ${changed}${failed ? ` · ${failed} 失败` : ""}`,
+          failed ? "error" : "success");
+      }
+
+      // Bulk reply helpers. Collect one address per selected email's
+      // sender (skips empty senders + sent/draft/trash records which
+      // don't have a coherent "reply target"). Order = first-seen.
+      function _collectSendersForBulkReply(items) {
+        const expanded = _expandMergedInboxMembers(items);
+        const seen = new Set();
+        const out = [];
+        for (const it of expanded) {
+          const addr = (it && it.from_email || "").trim();
+          if (!addr) continue;
+          const key = addr.toLowerCase();
+          if (seen.has(key)) continue;
+          seen.add(key);
+          out.push(addr);
+        }
+        return out;
+      }
+
+      async function bulkReplyToMultiple(items, senders) {
+        if (!senders || senders.length === 0) return;
+        // Suggest a subject prefixed with "Re:" if the selected items
+        // share one; otherwise leave blank (user can fill in).
+        const subjects = new Set(
+          _expandMergedInboxMembers(items)
+            .map((x) => (x.subject || "").trim())
+            .filter(Boolean)
+        );
+        let suggestSubject = "";
+        if (subjects.size === 1) {
+          const only = subjects.values().next().value;
+          suggestSubject = subjectAlreadyReply(only) ? only : `Re: ${only}`;
+        }
+        Selection.clear();
+        openCompose({
+          mode: "reply",
+          to: senders.join(", "),
+          subject: suggestSubject,
+          body: "",
+          send_independently: true,
+        });
+      }
+
+      // Merged-inbox rows expose their constituent emails via
+      // __threadItems. Batch flag flips must reach every member,
+      // otherwise the merge row would keep the flag alive on the next
+      // render. Expand once here rather than in every bulk helper.
+      function _expandMergedInboxMembers(items) {
+        const out = [];
+        const seen = new Set();
+        for (const item of items) {
+          if (!item) continue;
+          if (item.__merged && Array.isArray(item.__threadItems)) {
+            for (const inner of item.__threadItems) {
+              if (inner && inner.id && !seen.has(inner.id) && inner.__record_type !== "sent") {
+                seen.add(inner.id);
+                out.push(inner);
+              }
+            }
+          } else if (item.id && !seen.has(item.id)) {
+            seen.add(item.id);
+            out.push(item);
+          }
+        }
+        return out;
       }
 
       function buildSearchText(item, kind, scope) {
@@ -7897,6 +9551,10 @@
         body.innerHTML = list
           .map((item) => renderListItem(item, kind))
           .join("");
+        // Refresh multi-select and AI-search bars now that the DOM is
+        // rebuilt. (The bars live as siblings of #list_body.)
+        renderAiSearchBar();
+        renderSelectionBar();
         body.querySelectorAll(".mail-item").forEach((el) => {
           const lookupItem = () => {
             const id = el.dataset.id;
@@ -7907,15 +9565,44 @@
                 (threadKey ? String(x.__threadKey || "") === threadKey : true)
             );
           };
-          el.onclick = () => {
+          // Reflect selection state on this row on every re-render.
+          if (Selection.has(el.dataset.id)) el.classList.add("selected");
+          el.onclick = (e) => {
             const item = lookupItem();
-            if (item) selectEmail(item);
+            if (!item) return;
+            // Modifier-click semantics: build a selection set instead of
+            // opening the detail. The kind check keeps sent/draft/trash
+            // out of multi-select (they're one-off flows in practice).
+            const multiKinds = new Set(["inbox", "trash", "sent", "draft"]);
+            if (multiKinds.has(kind) && (e.metaKey || e.ctrlKey)) {
+              e.preventDefault();
+              Selection.toggle(item.id);
+              renderSelectionBar();
+              return;
+            }
+            if (multiKinds.has(kind) && e.shiftKey) {
+              e.preventDefault();
+              Selection.extendTo(item.id, list);
+              renderSelectionBar();
+              return;
+            }
+            // Plain click: clear multi-selection and open the row.
+            Selection.set(item.id);
+            selectEmail(item);
           };
           el.oncontextmenu = (e) => {
             const item = lookupItem();
             if (!item) return;
             e.preventDefault();
-            // Visually select the row so the menu's target is obvious.
+            // If this row is part of a 2+ multi-selection, show the
+            // batch menu. Otherwise, snap selection to just this row
+            // (standard email-client behavior) and show the single menu.
+            if (Selection.count() >= 2 && Selection.has(item.id)) {
+              const items = Selection.resolveItems(list);
+              openBulkMailContextMenu(e.clientX, e.clientY, items, kind);
+              return;
+            }
+            Selection.set(item.id);
             selectEmail(item);
             openMailContextMenu(e.clientX, e.clientY, item, kind);
           };
@@ -7923,13 +9610,36 @@
             el.setAttribute("draggable", "true");
             el.addEventListener("dragstart", (e) => {
               const id = el.dataset.id;
-              e.dataTransfer.setData("text/x-xemail-id", id);
-              e.dataTransfer.setData("text/plain", id);
+              // Multi-select drag: if THIS row is part of a 2+ selection,
+              // carry every selected id in the drag payload so the drop
+              // target can move them all. Also highlight every selected
+              // row so it's visually obvious what's being dragged.
+              if (Selection.count() >= 2 && Selection.has(id)) {
+                const ids = _expandMergedInboxMembers(Selection.resolveItems(list))
+                  .map((x) => x.id).filter(Boolean);
+                e.dataTransfer.setData(
+                  "text/x-xemail-ids",
+                  JSON.stringify(ids),
+                );
+                // Also set the single-id key for droptargets that don't
+                // know about the batch key yet — they'll only see one.
+                e.dataTransfer.setData("text/x-xemail-id", id);
+                e.dataTransfer.setData("text/plain", String(ids.length) + " emails");
+                body.querySelectorAll(".mail-item.selected").forEach((n) => n.classList.add("dragging"));
+              } else {
+                // Plain single-drag: also snap selection so ancillary
+                // UI (highlight, batch bar) stays in sync.
+                Selection.set(id);
+                renderSelectionBar();
+                e.dataTransfer.setData("text/x-xemail-id", id);
+                e.dataTransfer.setData("text/plain", id);
+                el.classList.add("dragging");
+              }
               e.dataTransfer.effectAllowed = "move";
-              el.classList.add("dragging");
             });
             el.addEventListener("dragend", () => {
-              el.classList.remove("dragging");
+              body.querySelectorAll(".mail-item.dragging")
+                .forEach((n) => n.classList.remove("dragging"));
               // Make sure no leftover highlight on any folder.
               document
                 .querySelectorAll(".folder.drop-target")
@@ -8653,9 +10363,25 @@
           renderDetail(item);
           return;
         }
-        // Single email → open the why-modal so we can record an experience.
-        // The modal's submit handler does the actual flip + experience write.
-        openImportanceModal(item, !item.important);
+        // Single email → flip the ⭐ flag first (immediate visual
+        // feedback), then fire the auto-experience modal in the
+        // background so the AI can propose a rule derived from the flip.
+        // Same "move first, suggest after" pattern as moveEmailTo — a
+        // slow LLM never delays the flip itself.
+        const targetVal = !item.important;
+        const updated = await applyEmailUpdate(item, { important: targetVal });
+        if (!updated) return;   // applyEmailUpdate already surfaced the error
+        // Refresh visible state now, before the suggest LLM call fires.
+        setStatus(
+          targetVal ? t("已标记为重要,正在分析经验…") : t("已取消重要,正在分析经验…"),
+          "success"
+        );
+        renderFolders();
+        renderList();
+        renderDetail(updated);
+        openExperienceSuggestModal(
+          _buildImportanceSuggestConfig(item, targetVal ? "mark" : "unmark")
+        );
       }
 
       function openImportanceModal(item, markImportant) {
@@ -8919,6 +10645,176 @@
           setStatus(err.message, "error");
           submitBtn.disabled = false;
           submitBtn.textContent = oldLabel;
+        }
+      }
+
+      // Experience-suggest modal: opens right after moveEmailTo has moved
+      // the email. Pulls the AI-generated candidate + duplicate check from
+      // /suggest, then lets the user confirm with a single click. State
+      // is held module-scope so the confirm callback can find it back.
+      let EXP_SUGGEST_PENDING = null;
+
+      // Generic auto-experience modal driver. Called from any user
+      // action that just made a classification-relevant change (move to
+      // folder X, mark/unmark ⭐, ...). The change itself is already
+      // applied; this modal only offers to record a one-line experience
+      // for future classification runs.
+      //
+      // `cfg` shape:
+      //   {
+      //     item,                     // email record (must have .id, .subject)
+      //     contextHtml,              // rich context line shown at the top
+      //     suggestUrl,               // POST → returns RecategorizeSuggestion shape
+      //     suggestBody,              // body sent to suggestUrl
+      //     confirmUrl,               // POST → same 3-way (add/reuse/skip) contract
+      //   }
+      async function openExperienceSuggestModal(cfg) {
+        // Back-compat: earlier callers used positional (item, fromCat, toCat).
+        // Detect and normalise so old call sites keep working while the new
+        // signature is the primary path.
+        if (cfg && cfg.id !== undefined && !cfg.item) {
+          // eslint-disable-next-line prefer-rest-params
+          const [item, fromCategory, toCategory] = arguments;
+          cfg = _buildRecategorizeSuggestConfig(item, fromCategory, toCategory);
+        }
+        const { item, contextHtml, suggestUrl, suggestBody, confirmUrl } = cfg;
+        EXP_SUGGEST_PENDING = {
+          item,
+          confirmUrl,
+          duplicateOf: null,
+        };
+        const m = $("experience_suggest_modal");
+        if (!m) return;
+        $("experience_suggest_context").innerHTML = contextHtml;
+        $("experience_suggest_loading").style.display = "";
+        $("experience_suggest_content").style.display = "none";
+        $("experience_suggest_error").style.display = "none";
+        $("experience_suggest_dup_hint").style.display = "none";
+        $("btn_exp_suggest_add").disabled = true;
+        $("btn_exp_suggest_add").textContent = t("＋ 新增经验");
+        $("btn_exp_suggest_reuse").style.display = "none";
+        $("btn_exp_suggest_skip").disabled = false;
+        m.classList.add("open");
+
+        let suggestion;
+        try {
+          suggestion = await api(suggestUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(suggestBody),
+          });
+        } catch (err) {
+          $("experience_suggest_loading").style.display = "none";
+          $("experience_suggest_error").style.display = "";
+          $("experience_suggest_error").textContent =
+            (t("获取候选失败: ") + (err && err.message || err));
+          // Leave the skip button enabled so the user can close cleanly.
+          return;
+        }
+
+        // Modal may have been closed while the request was in flight.
+        if (!EXP_SUGGEST_PENDING || EXP_SUGGEST_PENDING.item.id !== item.id) return;
+
+        $("experience_suggest_loading").style.display = "none";
+        $("experience_suggest_content").style.display = "";
+        const candidate = (suggestion.candidate_text || "").trim();
+        $("experience_suggest_text").value = candidate;
+
+        if (suggestion.error && !candidate) {
+          $("experience_suggest_error").style.display = "";
+          $("experience_suggest_error").textContent = "❗ " + suggestion.error;
+        }
+        if (suggestion.reason) {
+          $("experience_suggest_reason").textContent = "💡 " + suggestion.reason;
+        } else {
+          $("experience_suggest_reason").textContent = "";
+        }
+
+        // If the LLM says this candidate duplicates an existing one,
+        // surface the existing text and swap the primary CTA to "reuse".
+        EXP_SUGGEST_PENDING.duplicateOf = suggestion.duplicate_of || null;
+        if (suggestion.duplicate_of && suggestion.similar_text) {
+          $("experience_suggest_dup_hint").style.display = "";
+          $("experience_suggest_dup_hint").innerHTML =
+            `⚠️ ${t("检测到与已有经验重复,建议直接复用不新增:")}<br>` +
+            `<span style="color:var(--text);margin-top:4px;display:inline-block">『${escapeHtml(suggestion.similar_text)}』</span>`;
+          $("btn_exp_suggest_reuse").style.display = "";
+        }
+        $("btn_exp_suggest_add").disabled = !candidate;
+      }
+
+      // Recategorize-flavoured config builder — keeps the call sites in
+      // moveEmailTo compact.
+      function _buildRecategorizeSuggestConfig(item, fromCategory, toCategory) {
+        return {
+          item,
+          contextHtml:
+            `<strong>${escapeHtml(item.subject || "(无主题)")}</strong>` +
+            `  · ${escapeHtml(fromCategory)} <span style="color:var(--text-subtle)">→</span> ${escapeHtml(toCategory)}`,
+          suggestUrl: `/api/emails/${encodeURIComponent(item.id)}/recategorize/suggest`,
+          suggestBody: { from_category: fromCategory, to_category: toCategory },
+          confirmUrl: `/api/emails/${encodeURIComponent(item.id)}/recategorize/confirm`,
+        };
+      }
+
+      // Importance-flavoured config builder. `direction` is "mark"|"unmark"
+      // and mirrors the flip the frontend just applied via /update.
+      function _buildImportanceSuggestConfig(item, direction) {
+        const label = direction === "mark" ? t("标为重要") : t("取消重要");
+        return {
+          item,
+          contextHtml:
+            `<strong>${escapeHtml(item.subject || "(无主题)")}</strong>` +
+            `  · ⭐ ${escapeHtml(label)}`,
+          suggestUrl: `/api/emails/${encodeURIComponent(item.id)}/importance/suggest`,
+          suggestBody: { direction },
+          confirmUrl: `/api/emails/${encodeURIComponent(item.id)}/importance/confirm`,
+        };
+      }
+
+      function closeExperienceSuggestModal() {
+        const m = $("experience_suggest_modal");
+        if (m) m.classList.remove("open");
+        EXP_SUGGEST_PENDING = null;
+      }
+
+      async function confirmExperienceSuggest(action) {
+        if (!EXP_SUGGEST_PENDING) { closeExperienceSuggestModal(); return; }
+        const { confirmUrl, duplicateOf } = EXP_SUGGEST_PENDING;
+        const btnAdd = $("btn_exp_suggest_add");
+        const btnReuse = $("btn_exp_suggest_reuse");
+        const btnSkip = $("btn_exp_suggest_skip");
+        for (const b of [btnAdd, btnReuse, btnSkip]) if (b) b.disabled = true;
+
+        let body;
+        if (action === "add") {
+          body = {
+            action: "add",
+            text: ($("experience_suggest_text").value || "").trim(),
+          };
+        } else if (action === "reuse") {
+          body = { action: "reuse", reuse_id: duplicateOf };
+        } else {
+          body = { action: "skip" };
+        }
+        try {
+          const res = await api(confirmUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          if (res.status === "added") {
+            setStatus(t("已新增一条经验"), "success");
+            loadPrompts();  // pull the fresh experience list into the sidebar
+          } else if (res.status === "reused") {
+            setStatus(t("已复用现有经验,未新增重复"), "success");
+          } else {
+            setStatus(t("经验未记录"), "info");
+          }
+          closeExperienceSuggestModal();
+        } catch (err) {
+          setStatus((err && err.message) || t("操作失败"), "error");
+          for (const b of [btnAdd, btnReuse, btnSkip]) if (b) b.disabled = false;
         }
       }
 
@@ -9224,9 +11120,28 @@
       // "Why this category?" modal so we can distill a reusable experience.
       // Pure UI flips (placeholder upgrades etc.) should call
       // applyEmailUpdate directly with { category } and bypass this.
-      function moveEmailTo(item, category) {
+      // Two-phase categorize: the move itself is fast and unconditional
+      // (matches every other drag-drop / right-click move users have muscle
+      // memory for). The classification-experience proposal from the LLM
+      // then floats in as a non-blocking modal — the user only clicks once
+      // ("confirm the AI-generated experience" or "reuse an existing" or
+      // "skip"). This replaces the old "type a reason" flow so a batch of
+      // re-classifications no longer feels like a series of essay
+      // prompts.
+      async function moveEmailTo(item, category) {
         if (!category || category === item.category) return;
-        openRecategorizeModal(item, category);
+        const originalCategory = item.category || "未分类";
+        const updated = await applyEmailUpdate(item, { category });
+        if (!updated) return;   // status set by applyEmailUpdate
+        applyMovedEmailToUI(updated, item, {
+          statusMessage: `已移动到 ${updated.category || category}，正在分析经验…`,
+        });
+        // Kick off the AI suggestion in the background so a slow LLM never
+        // blocks the visible move. Pass the pre-move category so the LLM
+        // reasons about the delta.
+        openExperienceSuggestModal(
+          _buildRecategorizeSuggestConfig(item, originalCategory, updated.category || category)
+        );
       }
 
       function applyMovedEmailToUI(updated, originalItem, options) {
@@ -9262,6 +11177,61 @@
         }
       }
 
+      // Right-click 「重新智能分类」 — re-run the classifier on ONE email
+      // using the latest rules / prompts / experiences. Clean-slate: both
+      // category and important get reset before classification, matching
+      // the bulk 「重新分类」 semantics (a manual ⭐ set earlier will be
+      // overwritten if the classifier now disagrees — this is what the
+      // user asked for when they picked this menu item).
+      async function reclassifySingleEmail(item) {
+        if (!item || !item.id) return;
+        const oldCategory = item.category || "未分类";
+        const oldImportant = !!item.important;
+        setStatus(t("重新分类中…"), "info");
+        let updated;
+        try {
+          updated = await api(
+            `/api/emails/${encodeURIComponent(item.id)}/reclassify`,
+            { method: "POST" }
+          );
+        } catch (err) {
+          setStatus(err.message || t("重新分类失败"), "error");
+          return;
+        }
+        // Patch the in-memory record so the list / detail reflect the
+        // new verdict without a full refresh round-trip.
+        const idx = allEmails.findIndex((e) => e.id === item.id);
+        if (idx >= 0) {
+          allEmails[idx] = { ...allEmails[idx], ...updated };
+        }
+        const newCategory = updated.category || "未分类";
+        const newImportant = !!updated.important;
+        // Build a short summary of what changed.
+        const parts = [];
+        if (newCategory !== oldCategory) {
+          parts.push(`${t("分类")} ${oldCategory} → ${newCategory}`);
+        }
+        if (newImportant !== oldImportant) {
+          parts.push(newImportant ? t("已标为重要") : t("已取消重要"));
+        }
+        const summary = parts.length
+          ? parts.join("，")
+          : t("重新分类完成:无变化");
+        // If the category actually moved, the row leaves the current
+        // folder — reuse applyMovedEmailToUI so we handle the "row
+        // disappears from the visible list" case identically to a
+        // drag-drop / 移动到 flow. Otherwise, just refresh the same
+        // row in place.
+        if (newCategory !== oldCategory) {
+          applyMovedEmailToUI(updated, item, { statusMessage: summary });
+        } else {
+          setStatus(summary, "success");
+          renderFolders();
+          renderList();
+          if (currentEmailId === item.id) renderDetail(updated);
+        }
+      }
+
       function replyToEmail(item) {
         const to = item.from_email || "";
         const origSubject = (item.subject || "").trim();
@@ -9279,42 +11249,65 @@
         });
       }
 
-      // Reply All: sender + every original To + every original Cc, minus
-      // the active account's own address(es). Per the user's spec we put
-      // them all in the To field (no Cc) — easier to scan and edit before
-      // sending.
+      // Reply All: standard email-client semantics —
+      //   To = original 发件人 (only)
+      //   Cc = original To + Cc (minus self, minus the sender who moved to To)
+      // The user's own address(es) never appear on either line so the
+      // reply doesn't bounce back to themselves.
       function replyAllToEmail(item) {
         const fromAddrs = getAllAddressesOf(item, "from");
         const toAddrs = getAllAddressesOf(item, "to");
         const ccAddrs = getAllAddressesOf(item, "cc");
         const self = selfAddressesLower();
+
+        // Build the To list from senders only (usually 1; a re-forwarded
+        // thread can have multiple). Skip self so a reply to my own
+        // sent mail doesn't self-loop.
         const seen = new Set();
-        const recipients = [];
-        for (const list of [fromAddrs, toAddrs, ccAddrs]) {
+        const toRecipients = [];
+        for (const a of fromAddrs) {
+          const key = (a.email || "").toLowerCase();
+          if (!key || self.has(key) || seen.has(key)) continue;
+          seen.add(key);
+          toRecipients.push(a);
+        }
+
+        // Cc list = every OTHER original recipient, minus self, minus
+        // anyone already on the To line.
+        const ccRecipients = [];
+        for (const list of [toAddrs, ccAddrs]) {
           for (const a of list) {
             const key = (a.email || "").toLowerCase();
             if (!key || self.has(key) || seen.has(key)) continue;
             seen.add(key);
-            recipients.push(a);
+            ccRecipients.push(a);
           }
         }
-        if (recipients.length === 0) {
-          // Fall back to a normal reply if dedup somehow stripped everyone.
-          replyToEmail(item);
-          return;
+
+        // If the sender IS the current user (replying to my own outgoing
+        // mail — rare but possible) toRecipients could be empty. Promote
+        // the first Cc entry into To so the message has a valid To.
+        if (toRecipients.length === 0) {
+          if (ccRecipients.length > 0) {
+            toRecipients.push(ccRecipients.shift());
+          } else {
+            replyToEmail(item);
+            return;
+          }
         }
-        // Format as "Name <email>" when a meaningful display name is present.
-        // Drop the name when it equals the address or itself contains '@' —
-        // Python's getaddresses (used server-side to validate) chokes on
-        // an unquoted @-bearing display name and emits the whole header as
-        // empty, which surfaces as "收件人不能为空" on send.
-        const to = recipients
-          .map((a) => {
-            const name = (a.name || "").trim();
-            const useName = name && !/@/.test(name) && name.toLowerCase() !== a.email.toLowerCase();
-            return useName ? `${name} <${a.email}>` : a.email;
-          })
-          .join(", ");
+
+        // Format as "Name <email>" when a meaningful display name is
+        // present. Drop the name when it equals the address or itself
+        // contains '@' — Python's getaddresses chokes on unquoted
+        // @-bearing display names and returns the whole header empty,
+        // which surfaces server-side as "收件人不能为空" on send.
+        const fmt = (a) => {
+          const name = (a.name || "").trim();
+          const useName = name && !/@/.test(name) && name.toLowerCase() !== a.email.toLowerCase();
+          return useName ? `${name} <${a.email}>` : a.email;
+        };
+        const to = toRecipients.map(fmt).join(", ");
+        const cc = ccRecipients.map(fmt).join(", ");
         const origSubject = (item.subject || "").trim();
         const subject = subjectAlreadyReply(origSubject)
           ? origSubject
@@ -9322,6 +11315,7 @@
         openCompose({
           mode: "reply",
           to,
+          cc,
           subject,
           body: "\n\n" + buildReplyQuote(item),
           originalId: item.id,
@@ -9663,121 +11657,30 @@
       }
 
       async function classifyUnsorted() {
-        const btn = $("btn_classify");
-        btn.disabled = true;
-        const oldText = btn.textContent;
-        btn.textContent = t("分类中…");
-        let serverError = null;
-        let lastSummary = null;
-        const skippedClassify = []; // each: {index, total, uid, reason}
-        try {
-          const resp = await fetch("/api/classify-unsorted/stream", {
-            method: "POST",
-            credentials: "same-origin",
-            headers: { Accept: "application/x-ndjson" },
-          });
-          if (resp.status === 401) {
-            window.location.replace("/login");
-            return;
-          }
-          if (!resp.ok || !resp.body) {
-            const data = await resp.json().catch(() => ({}));
-            throw new Error(
-              formatApiError(data) || `${t("请求失败")}（HTTP ${resp.status}）`
-            );
-          }
-
-          const reader = resp.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = "";
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split("\n");
-            buffer = lines.pop();
-            for (const raw of lines) {
-              const line = raw.trim();
-              if (!line) continue;
-              let ev;
-              try {
-                ev = JSON.parse(line);
-              } catch (_) {
-                continue;
-              }
-              const en = I18n.getLang() === "en";
-              if (ev.type === "planned") {
-                setStatus(
-                  ev.total > 0
-                    ? (en
-                        ? `Ready to classify ${ev.total} uncategorized emails…`
-                        : `准备执行智能分类 ${ev.total} 封未分类邮件…`)
-                    : (en
-                        ? "No \"Uncategorized\" emails to process"
-                        : "没有「未分类」邮件需要处理")
-                );
-              } else if (ev.type === "classified") {
-                // No char cap: .status-bar CSS (nowrap + text-overflow:
-                // ellipsis) fills the full width and ellipsizes only at
-                // the visual edge.
-                const subj = ev.subject || t("(无主题)");
-                const cat = ev.category || t("未分类");
-                btn.textContent = en
-                  ? `Classifying ${ev.index}/${ev.total}…`
-                  : `分类中 ${ev.index}/${ev.total}…`;
-                setStatus(
-                  en
-                    ? `Classified ${ev.index}/${ev.total}: [${cat}] ${subj}`
-                    : `已分类 ${ev.index}/${ev.total}：[${cat}] ${subj}`
-                );
-              } else if (ev.type === "skipped") {
-                skippedClassify.push(ev);
-                btn.textContent = en
-                  ? `Classifying ${ev.index}/${ev.total} (skipped ${skippedClassify.length})…`
-                  : `分类中 ${ev.index}/${ev.total}（已跳过 ${skippedClassify.length}）…`;
-                setStatus(
-                  en
-                    ? `Skipped ${ev.index}/${ev.total}: ${ev.reason || t("处理失败")}`
-                    : `跳过 ${ev.index}/${ev.total}：${ev.reason || t("处理失败")}`,
-                  "error"
-                );
-              } else if (ev.type === "saved") {
-                lastSummary = ev;
-              } else if (ev.type === "error") {
-                serverError = ev.message || t("服务器内部错误");
-              } else if (ev.type === "done") {
-                lastSummary = ev;
-              }
+        // Backend now runs the work as a background task; TaskPoll drives
+        // the progress modal + pause/resume/cancel and reattaches on
+        // navigation. See app/services/task_registry.py.
+        await TaskPoll.start("/api/tasks/classify-unsorted/start", {
+          onDone: (info) => {
+            const r = info.result || {};
+            const total = r.total ?? 0;
+            const classified = r.classified ?? 0;
+            const remaining = r.remaining ?? 0;
+            const skipCount = r.skipped ?? 0;
+            const en = I18n.getLang() === "en";
+            let message = en
+              ? `Classification done: ${classified} classified, ${remaining} still uncategorized (of ${total} total)`
+              : `执行分类完成：成功 ${classified} 封，仍未分类 ${remaining} 封（共 ${total} 封）`;
+            if (skipCount) {
+              message += en
+                ? `, skipped ${skipCount} (see server logs)`
+                : `，跳过 ${skipCount} 封（详见服务器日志）`;
             }
-          }
-          if (serverError) {
-            setStatus(serverError, "error");
-            alert((I18n.getLang() === "en" ? "Classification failed:\n" : "执行分类失败：\n") + serverError);
-            return;
-          }
-
-          await refreshAll();
-          const total = lastSummary?.fetched ?? 0;
-          const classified = lastSummary?.stored ?? 0;
-          const remaining = lastSummary?.remaining ?? 0;
-          const skipCount = skippedClassify.length;
-          const enS = I18n.getLang() === "en";
-          let message = enS
-            ? `Classification done: ${classified} classified, ${remaining} still uncategorized (of ${total} total)`
-            : `执行分类完成：成功 ${classified} 封，仍未分类 ${remaining} 封（共 ${total} 封）`;
-          if (skipCount) {
-            message += enS
-              ? `, skipped ${skipCount} (see server logs)`
-              : `，跳过 ${skipCount} 封（详见服务器日志）`;
-          }
-          const hasRisk = remaining > 0 || skipCount > 0;
-          setStatus(message, hasRisk ? "error" : "success");
-        } catch (err) {
-          setStatus(err.message, "error");
-        } finally {
-          btn.disabled = false;
-          btn.textContent = oldText;
-        }
+            const hasRisk = remaining > 0 || skipCount > 0;
+            setStatus(message, hasRisk ? "error" : "success");
+            refreshAll().catch(() => {});
+          },
+        });
       }
 
       async function reclassifyAll() {
@@ -9793,119 +11696,25 @@
             "注意：此操作会覆盖手动打的 ⭐ 重要标记；如需保留手动标记请改用「智能分类」。\n" +
             "确定继续吗？";
         if (!window.confirm(msg)) return;
-        const btn = $("btn_reclassify");
-        btn.disabled = true;
-        const oldText = btn.textContent;
-        btn.textContent = t("重新分类中…");
-
-        let serverError = null;
-        let lastSummary = null;
-        const skippedReclassify = [];  // each: {index, total, uid, reason}
-        try {
-          const resp = await fetch("/api/reclassify-all/stream", {
-            method: "POST",
-            credentials: "same-origin",
-            headers: { Accept: "application/x-ndjson" },
-          });
-          if (resp.status === 401) {
-            window.location.replace("/login");
-            return;
-          }
-          if (!resp.ok || !resp.body) {
-            const data = await resp.json().catch(() => ({}));
-            throw new Error(
-              formatApiError(data) || `${t("请求失败")}（HTTP ${resp.status}）`
-            );
-          }
-          const reader = resp.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = "";
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split("\n");
-            buffer = lines.pop();
-            for (const raw of lines) {
-              const line = raw.trim();
-              if (!line) continue;
-              let ev;
-              try {
-                ev = JSON.parse(line);
-              } catch (_) {
-                continue;
-              }
-              const en = I18n.getLang() === "en";
-              if (ev.type === "planned") {
-                setStatus(
-                  ev.total > 0
-                    ? (en
-                        ? `Ready to reclassify ${ev.total} emails…`
-                        : `准备重新分类 ${ev.total} 封邮件…`)
-                    : (en
-                        ? "No emails to reclassify for the current account"
-                        : "当前账号没有邮件可重新分类")
-                );
-              } else if (ev.type === "classified") {
-                // No char cap: .status-bar CSS (nowrap + text-overflow:
-                // ellipsis) fills the full width and ellipsizes only at
-                // the visual edge.
-                const subj = ev.subject || t("(无主题)");
-                const cat = ev.category || t("未分类");
-                btn.textContent = en
-                  ? `Reclassifying ${ev.index}/${ev.total}…`
-                  : `重新分类中 ${ev.index}/${ev.total}…`;
-                setStatus(
-                  en
-                    ? `Reclassified ${ev.index}/${ev.total}: [${cat}] ${subj}`
-                    : `已重新分类 ${ev.index}/${ev.total}：[${cat}] ${subj}`
-                );
-              } else if (ev.type === "skipped") {
-                skippedReclassify.push(ev);
-                btn.textContent = en
-                  ? `Reclassifying ${ev.index}/${ev.total} (skipped ${skippedReclassify.length})…`
-                  : `重新分类中 ${ev.index}/${ev.total}（已跳过 ${skippedReclassify.length}）…`;
-                setStatus(
-                  en
-                    ? `Skipped ${ev.index}/${ev.total}: ${ev.reason || t("处理失败")}`
-                    : `跳过 ${ev.index}/${ev.total}：${ev.reason || t("处理失败")}`,
-                  "error"
-                );
-              } else if (ev.type === "saved") {
-                lastSummary = ev;
-              } else if (ev.type === "error") {
-                serverError = ev.message || t("服务器内部错误");
-              } else if (ev.type === "done") {
-                lastSummary = ev;
-              }
+        await TaskPoll.start("/api/tasks/reclassify-all/start", {
+          onDone: (info) => {
+            const r = info.result || {};
+            const total = r.total ?? 0;
+            const changed = r.changed ?? 0;
+            const skipCount = r.skipped ?? 0;
+            const en2 = I18n.getLang() === "en";
+            let message = en2
+              ? `Reclassification done: processed ${total}, category changed for ${changed}`
+              : `重新分类完成：共处理 ${total} 封，分类发生变化 ${changed} 封`;
+            if (skipCount) {
+              message += en2
+                ? `, skipped ${skipCount} (see server logs)`
+                : `，跳过 ${skipCount} 封（详见服务器日志）`;
             }
-          }
-          if (serverError) {
-            setStatus(serverError, "error");
-            alert((I18n.getLang() === "en" ? "Reclassification failed:\n" : "重新分类失败：\n") + serverError);
-            return;
-          }
-          await refreshAll();
-          const total = lastSummary?.fetched ?? 0;
-          const changed = lastSummary?.stored ?? 0;
-          const skipCount = skippedReclassify.length;
-          const en = I18n.getLang() === "en";
-          let message = en
-            ? `Reclassification done: processed ${total}, category changed for ${changed}`
-            : `重新分类完成：共处理 ${total} 封，分类发生变化 ${changed} 封`;
-          if (skipCount) {
-            message += en
-              ? `, skipped ${skipCount} (see server logs)`
-              : `，跳过 ${skipCount} 封（详见服务器日志）`;
-          }
-          setStatus(message, skipCount ? "error" : "success");
-          alert(message);
-        } catch (err) {
-          setStatus(err.message, "error");
-        } finally {
-          btn.disabled = false;
-          btn.textContent = oldText;
-        }
+            setStatus(message, skipCount ? "error" : "success");
+            refreshAll().catch(() => {});
+          },
+        });
       }
 
       async function resetReceived() {
@@ -10067,174 +11876,32 @@
       }
 
       async function receiveEmails() {
-        const btn = $("btn_receive");
-        btn.disabled = true;
-        const oldText = btn.textContent;
-        btn.textContent = t("收取中…");
-
-        // The day window is configured per-account in 设置 → 服务器同步;
-        // backend reads sync.fetch_days when no `?days=` is supplied. No
-        // per-receive override anymore — keeps the toolbar simple and the
-        // user's preference consistent across clicks.
-        const url = "/api/receive/stream";
-
-        // The endpoint streams NDJSON: each line is one event JSON object.
-        // We parse incrementally and refresh the email list once at the end.
-        let serverError = null;
-        let lastSummary = null;
-        const skipped = [];  // each entry: {index, total, uid, reason}
-        try {
-          const resp = await fetch(url, {
-            method: "POST",
-            credentials: "same-origin",
-            headers: { Accept: "application/x-ndjson" },
-          });
-          if (resp.status === 401) {
-            window.location.replace("/login");
-            return;
-          }
-          if (!resp.ok || !resp.body) {
-            const data = await resp.json().catch(() => ({}));
-            throw new Error(
-              formatApiError(data) || `${t("请求失败")}（HTTP ${resp.status}）`
-            );
-          }
-          const reader = resp.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = "";
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split("\n");
-            buffer = lines.pop();
-            for (const raw of lines) {
-              const line = raw.trim();
-              if (!line) continue;
-              let ev;
-              try {
-                ev = JSON.parse(line);
-              } catch (_) {
-                continue;
-              }
-              if (ev.type === "connected") {
-                setStatus("已连接邮箱，正在搜索…");
-              } else if (ev.type === "planned") {
-                const tag = ev.mode === "incremental" ? "新邮件" : "邮件";
-                const window = ev.days ? `近 ${ev.days} 天` : "";
-                // `already_known` is how many UIDs the SEARCH returned but
-                // are already in the local store (we skipped re-fetching
-                // them). Surfacing this avoids the confusing "服务器有 50 封"
-                // when the user just widened from 5 → 10 days and 40 of
-                // those are mail they already had.
-                const skippedNote = ev.already_known
-                  ? `（跳过已存的 ${ev.already_known} 封）`
-                  : "";
-                setStatus(
-                  ev.total > 0
-                    ? `${window}服务器有 ${ev.total} 封${tag}待处理${skippedNote}…`
-                    : ev.already_known
-                      ? `${window}没有新邮件${skippedNote}`
-                      : ev.mode === "incremental"
-                        ? `${window}没有新邮件`
-                        : `${window}没有需要处理的邮件`
-                );
-              } else if (ev.type === "classified") {
-                // No char cap: .status-bar CSS (nowrap + text-overflow:
-                // ellipsis) fills the full width and ellipsizes only at
-                // the visual edge.
-                const subj = ev.subject || "(无主题)";
-                const cat = ev.category || "未分类";
-                // `received_at` is ISO-8601 UTC; show local YYYY-MM-DD so
-                // the user can see which day's mail is being processed.
-                let dateStr = "";
-                if (ev.received_at) {
-                  const d = new Date(ev.received_at);
-                  if (!isNaN(d.getTime())) {
-                    const y = d.getFullYear();
-                    const m = String(d.getMonth() + 1).padStart(2, "0");
-                    const day = String(d.getDate()).padStart(2, "0");
-                    dateStr = ` ${y}-${m}-${day}`;
-                  }
-                }
-                const en = I18n.getLang() === "en";
-                btn.textContent = en
-                  ? `Fetching ${ev.index}/${ev.total}…`
-                  : `收取中 ${ev.index}/${ev.total}…`;
-                setStatus(en
-                  ? `Classified ${ev.index}/${ev.total}${dateStr}: [${cat}] ${subj}`
-                  : `已分类 ${ev.index}/${ev.total}${dateStr}：[${cat}] ${subj}`);
-              } else if (ev.type === "skipped") {
-                // A single email failed to process; the server already
-                // logged the traceback and moved on. We accumulate counts
-                // here so the final summary tells the user what was lost.
-                skipped.push(ev);
-                const en = I18n.getLang() === "en";
-                btn.textContent = en
-                  ? `Fetching ${ev.index}/${ev.total} (skipped ${skipped.length})…`
-                  : `收取中 ${ev.index}/${ev.total}（已跳过 ${skipped.length}）…`;
-                setStatus(
-                  en
-                    ? `Skipped ${ev.index}/${ev.total} (UID ${ev.uid || "?"}): ${ev.reason || t("处理失败")}`
-                    : `跳过 ${ev.index}/${ev.total}（UID ${ev.uid || "?"}）：${ev.reason || t("处理失败")}`,
-                  "error"
-                );
-              } else if (ev.type === "batch-saved") {
-                // Server flushed a batch to disk. Reload the UI so the user
-                // sees the new mail right away instead of waiting until the
-                // entire fetch finishes. fire-and-forget: a slow refresh
-                // shouldn't block subsequent classified events from rendering.
-                lastSummary = ev;
-                setStatus(
-                  I18n.getLang() === "en"
-                    ? `Fetched ${ev.fetched}, added ${ev.stored}…`
-                    : `已收取 ${ev.fetched} 封，新增 ${ev.stored} 封…`,
-                  "success"
-                );
-                refreshAll().catch(() => {});
-              } else if (ev.type === "saved") {
-                lastSummary = ev;
-                setStatus(
-                  I18n.getLang() === "en"
-                    ? `Saving… ${ev.stored} new emails written`
-                    : `保存中… 已写入 ${ev.stored} 封新邮件`,
-                  "success"
-                );
-              } else if (ev.type === "error") {
-                serverError = ev.message || t("服务器内部错误");
-              } else if (ev.type === "done") {
-                lastSummary = ev;
-              }
+        // Backend runs receive as a background task with pause/cancel
+        // controls; day window is per-account (set in 设置 → 服务器同步)
+        // and read from the account's sync.fetch_days when start() sends
+        // no explicit `days`. TaskPoll drives the progress modal + polls
+        // /api/tasks/{id} until terminal — batch persistence still fires
+        // during the run, so refreshAll() on done is enough to reflect
+        // everything the user just fetched.
+        await TaskPoll.start("/api/tasks/receive/start", {
+          onDone: (info) => {
+            const r = info.result || {};
+            const f = r.fetched ?? 0;
+            const s = r.stored ?? 0;
+            const skipCount = r.skipped ?? 0;
+            const en = I18n.getLang() === "en";
+            let message = en
+              ? `Fetch complete: server returned ${f}, added ${s}`
+              : `收取完成：服务器返回 ${f} 封，新增 ${s} 封`;
+            if (skipCount) {
+              message += en
+                ? `, skipped ${skipCount} (see server logs)`
+                : `，跳过 ${skipCount} 封（详见服务器日志）`;
             }
-          }
-          if (serverError) {
-            setStatus(serverError, "error");
-            alert((I18n.getLang() === "en" ? "Failed to fetch:\n" : "收取邮件失败：\n") + serverError);
-            return;
-          }
-          await refreshAll();
-          const f = lastSummary?.fetched ?? 0;
-          const s = lastSummary?.stored ?? 0;
-          const skipCount = skipped.length;
-          const en = I18n.getLang() === "en";
-          let message = en
-            ? `Fetch complete: server returned ${f}, added ${s}`
-            : `收取完成：服务器返回 ${f} 封，新增 ${s} 封`;
-          if (skipCount) {
-            message += en
-              ? `, skipped ${skipCount} (see server logs)`
-              : `，跳过 ${skipCount} 封（详见服务器日志）`;
-          }
-          setStatus(message, skipCount ? "error" : "success");
-          // Quick non-blocking toast/alert per user request — alert() is the
-          // simplest cross-browser "modal at the end".
-          alert(message);
-        } catch (err) {
-          setStatus(err.message, "error");
-        } finally {
-          btn.disabled = false;
-          btn.textContent = oldText;
-        }
+            setStatus(message, skipCount ? "error" : "success");
+            refreshAll().catch(() => {});
+          },
+        });
       }
 
       // ============== compose ==============
@@ -10245,6 +11912,12 @@
         $("send_to").value = data.to || "";
         $("send_cc").value = data.cc || "";
         $("send_bcc").value = data.bcc || "";
+        // send_independently is opt-in per-open: default off, but honor
+        // the caller's `send_independently: true` when it's a
+        // reply-to-multiple flow that pre-picks the mode.
+        if ($("send_independently")) {
+          $("send_independently").checked = !!data.send_independently;
+        }
         // Reveal Cc / Bcc rows when the prefill carries values (e.g.
         // editing a draft that had them); collapse otherwise so the form
         // stays compact for the common case.
@@ -10924,6 +12597,7 @@
         const bcc = $("send_bcc").value.trim();
         const subject = $("send_subject").value.trim();
         const body = $("send_body").value;
+        const sendIndependently = !!$("send_independently")?.checked;
         if (!to) {
           setStatus("请填写收件人邮箱", "error");
           return;
@@ -10943,15 +12617,19 @@
               body,
               draft_id: editingDraftId || null,
               reply_to_inbox_id: replyingToInboxId || null,
+              send_independently: sendIndependently,
             }),
           });
-          setStatus("邮件发送成功，已存入已发送", "success");
+          setStatus(sendIndependently
+            ? "邮件已分别独立发送,已存入已发送"
+            : "邮件发送成功，已存入已发送", "success");
           editingDraftId = null;
           $("send_to").value = "";
           $("send_cc").value = "";
           $("send_bcc").value = "";
           $("send_subject").value = "";
           $("send_body").value = "";
+          if ($("send_independently")) $("send_independently").checked = false;
           setRecipientFieldVisible("cc", false);
           setRecipientFieldVisible("bcc", false);
           composeInitial = { to: "", cc: "", bcc: "", subject: "", body: "" };
@@ -11833,6 +13511,19 @@
           await refreshAll();
         }
         loadPrompts();
+
+        // Re-attach the progress modal to whichever long-running task
+        // is still running server-side. This is how switching pages
+        // works without losing progress: the task keeps executing on
+        // the backend regardless of navigation, and every time the
+        // main page mounts we ask "is one still going?" and reopen
+        // the modal if so. Also handles the reload-after-crash case:
+        // if the server-side task finished while we were away, its
+        // summary is shown until the user clicks 关闭.
+        TaskPoll.setKindDoneHook("receive", () => refreshAll().catch(() => {}));
+        TaskPoll.setKindDoneHook("classify_unsorted", () => refreshAll().catch(() => {}));
+        TaskPoll.setKindDoneHook("reclassify_all", () => refreshAll().catch(() => {}));
+        TaskPoll.reattachIfActive();
 
         // Re-render dynamic content when the language changes (e.g. user
         // toggled the picker in /settings in another tab). The DOM walker

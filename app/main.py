@@ -12,12 +12,13 @@ import json
 import mimetypes
 import os
 import queue
+import re
 import signal
 import subprocess
 import sys
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -36,7 +37,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.models import (
     Account,
@@ -55,6 +56,8 @@ from app.models import (
     ExperienceCreate,
     ExperienceOrganizeAction,
     ExperienceOrganizePlan,
+    PromptOrganizeAction,
+    PromptOrganizePlan,
     ExperienceUpdate,
     ImportanceToggleRequest,
     ImportanceToggleResult,
@@ -81,9 +84,16 @@ from app.models import (
     LlmFieldConfig,
     PasswordReset,
     PromptsView,
+    ActiveTaskResponse,
     ReceiveResult,
+    ReceiveTaskStartRequest,
+    RecategorizeConfirmRequest,
     RecategorizeRequest,
     RecategorizeResult,
+    ImportanceSuggestRequest,
+    RecategorizeSuggestRequest,
+    RecategorizeSuggestion,
+    TaskInfo,
     SendEmailRequest,
     SendResult,
     SentRecord,
@@ -124,6 +134,8 @@ from app.services.email_client import (
     receive_emails,
     send_email,
 )
+from app.services import task_registry
+from app.services.task_registry import TaskCancelled, TaskControl
 from app.storage import (
     DEFAULT_FOLDERS,
     UNCLASSIFIED_FOLDER,
@@ -568,6 +580,166 @@ def auth_logout(response: Response) -> Dict[str, str]:
     return {"status": "ok"}
 
 
+# -------- forgotten-password recovery (filesystem challenge) -----------
+#
+# XEmail runs as a local desktop app. The security boundary that
+# separates "the actual owner" from "a network attacker who found port
+# 8000" is *filesystem access to the data directory* — the same data
+# dir where password hashes, sessions, and API keys already live.
+# A network attacker can't read files there without user privileges;
+# the owner can trivially.
+#
+# So the recovery flow is: on request, write a random 6-digit code to
+# a 0600 challenge file inside the data dir; the user opens the file
+# through the OS, reads the code, types it back in the modal along
+# with a new password. A remote attacker triggering the /request
+# endpoint gets nothing they can use — the response only names the
+# file path, never the code itself.
+
+_PW_RESET_CHALLENGE_FILENAME = ".password_reset_challenge"
+_PW_RESET_TTL_SECONDS = 300  # 5 minutes
+
+
+def _pw_reset_challenge_path() -> Path:
+    from app.storage import DATA_DIR
+    return Path(DATA_DIR) / _PW_RESET_CHALLENGE_FILENAME
+
+
+def _write_pw_reset_challenge(username: str) -> "tuple[Path, int]":
+    """Create/overwrite the challenge file with a fresh random code.
+    Returns (path, ttl_seconds). File is written with 0600 perms."""
+    import secrets as _secrets
+    code = f"{_secrets.randbelow(1_000_000):06d}"
+    payload = {
+        "username": username,
+        "code": code,
+        "created_at": _now_iso(),
+        "expires_at": (datetime.now(timezone.utc)
+                       + timedelta(seconds=_PW_RESET_TTL_SECONDS)).isoformat(),
+    }
+    path = _pw_reset_challenge_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Two-step write so a partial write can't leave the previous code
+    # in place: write to .tmp, chmod 0600, rename atomically.
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp, path)
+    return path, _PW_RESET_TTL_SECONDS
+
+
+def _consume_pw_reset_challenge(username: str, code: str) -> None:
+    """Validate the code against the on-disk challenge and delete it.
+    Raises HTTPException on any mismatch — mismatches are deliberately
+    reported with the same message so a probe can't distinguish a
+    missing file from a wrong code from an expired code."""
+    path = _pw_reset_challenge_path()
+    generic = HTTPException(
+        status_code=400,
+        detail="验证码错误或已过期,请重新申请。",
+    )
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise generic
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        raise generic
+    if not isinstance(data, dict):
+        raise generic
+    if (data.get("username") or "") != username:
+        raise generic
+    if (data.get("code") or "") != code:
+        raise generic
+    exp_raw = data.get("expires_at") or ""
+    try:
+        exp = datetime.fromisoformat(exp_raw)
+    except ValueError:
+        raise generic
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    if exp < datetime.now(timezone.utc):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise generic
+    # Success — burn the challenge so the code can't be reused.
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+class PasswordResetRequest(BaseModel):
+    username: str
+
+
+class PasswordResetComplete(BaseModel):
+    username: str
+    code: str
+    new_password: str
+
+
+@app.post("/api/auth/password-reset/request")
+def auth_password_reset_request(payload: PasswordResetRequest) -> Dict[str, Any]:
+    """Create a fresh challenge code for the given username and drop it
+    into `<data_dir>/.password_reset_challenge`. Returns the path the
+    user must open — NEVER the code itself. Always returns success even
+    when the username doesn't exist, so a remote probe can't enumerate
+    valid usernames."""
+    uname = (payload.username or "").strip()
+    if not uname:
+        raise HTTPException(status_code=400, detail="用户名不能为空。")
+    # Whether or not the user exists, produce a challenge file so the
+    # response shape stays constant. Only when the /complete step
+    # actually looks up the user do we branch — but by then the code
+    # verification already gates the sensitive path.
+    path, ttl = _write_pw_reset_challenge(uname)
+    return {
+        "status": "ok",
+        "challenge_path": str(path),
+        "expires_in": ttl,
+        "hint": "已在上述文件生成验证码,请打开该文件查看,然后回本页面输入。",
+    }
+
+
+@app.post("/api/auth/password-reset/complete", response_model=User)
+def auth_password_reset_complete(
+    payload: PasswordResetComplete,
+    response: Response,
+) -> User:
+    """Verify the code from the on-disk challenge and set the user's
+    new password hash. On success also drops a fresh session cookie so
+    the user is logged in immediately."""
+    uname = (payload.username or "").strip()
+    code = (payload.code or "").strip()
+    new_pw = (payload.new_password or "")
+    if not uname or not code:
+        raise HTTPException(status_code=400, detail="用户名和验证码不能为空。")
+    if len(new_pw) < 6:
+        raise HTTPException(status_code=400, detail="新密码至少 6 位。")
+    _consume_pw_reset_challenge(uname, code)
+
+    record = get_user_by_username(uname)
+    if not record:
+        raise HTTPException(status_code=404, detail="用户不存在。")
+    update_user(record["id"], {"password_hash": hash_password(new_pw)})
+    _set_session_cookie(response, record["id"])
+    fresh = get_user(record["id"]) or record
+    return User(
+        id=fresh["id"],
+        username=fresh["username"],
+        role=fresh.get("role", "normal"),
+        active_account_id=fresh.get("active_account_id"),
+        created_at=fresh.get("created_at", ""),
+    )
+
+
 # -------- user management (admin) --------
 
 @app.get("/api/users", response_model=List[User])
@@ -913,6 +1085,8 @@ def _decorate_fixed_rule(r: Dict) -> FixedRule:
         code_preview=r.get("code_preview") or "",
         refs=refs,
         target_folder=r.get("target_folder") or "",
+        mark_important=bool(r.get("mark_important")),
+        unmark_important=bool(r.get("unmark_important")),
         created_at=r.get("created_at") or "",
         updated_at=r.get("updated_at"),
     )
@@ -1392,6 +1566,184 @@ def apply_organize_experiences(
     }
 
 
+# ── Single-email reclassify (right-click 「重新智能分类」) ───────────
+# The bulk 执行分类 / 重新分类 endpoints (see the task-registry code
+# above) rerun the classifier over the whole account. This one-shot
+# endpoint applies the same "clean-slate reclassify" semantics to a
+# single email — resets `category` and `important` first, then runs
+# `classify_email_record` against the current rules, prompts,
+# experiences, and field config. Useful when the user has just added
+# a fixed rule / prompt / experience and wants to test it on one
+# specific email without re-running the whole batch.
+#
+# Runs synchronously — one email is a single LLM call at worst, no
+# progress bar needed.
+
+@app.post(
+    "/api/emails/{email_id}/reclassify",
+    response_model=EmailRecord,
+)
+def reclassify_single_email(
+    email_id: str,
+    user: User = Depends(current_user),
+) -> EmailRecord:
+    target = get_email(email_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="邮件不存在。")
+    _assert_record_belongs_to_user(target, user)
+
+    account_id = target.get("account_id") or ""
+    ctx = _classification_context(account_id)
+
+    # Clean-slate reclassify semantics — same as reclassify_all: clear
+    # category + important so the LLM's verdict is fully authoritative
+    # and manual marks don't leak through. If the user wanted to
+    # preserve a manual ⭐, they'd use「智能分类」on the unclassified
+    # bucket instead (which is additive).
+    target["category"] = UNCLASSIFIED
+    target["important"] = False
+
+    try:
+        category, important, reason, trace = classify_email_record(
+            from_email=target.get("from_email") or "",
+            to_email=target.get("to_email") or "",
+            cc_email=target.get("cc_email") or "",
+            subject=target.get("subject") or "",
+            body=target.get("body") or "",
+            attachments=[
+                a.get("filename", "")
+                for a in (target.get("attachments") or [])
+            ],
+            **ctx,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"重新分类失败: {exc.__class__.__name__}: {exc}",
+        )
+
+    target["category"] = category or UNCLASSIFIED
+    target["important"] = bool(important)
+    target["spam_reason"] = reason
+    _append_classification_trace(target, trace)
+    upsert_email(target)
+    return EmailRecord(**target)
+
+
+# ── One-click organize for user prompts ──────────────────────────────
+# Same 2-step preview/apply contract as experiences. The apply step
+# re-validates every id + guards target_folder consistency so an old
+# preview can't merge prompts that have since moved to a different
+# folder (or been deleted).
+
+@app.post(
+    "/api/prompts/organize/preview",
+    response_model=PromptOrganizePlan,
+)
+def preview_organize_prompts(
+    user: User = Depends(current_user),
+) -> PromptOrganizePlan:
+    active_id = _active_account_id_for(user)
+    prompts = list_prompts_for_account(active_id)
+    if len(prompts) < 2:
+        return PromptOrganizePlan(actions=[])
+    from app.services.spam_filter import distill_organize_prompts
+
+    plan = distill_organize_prompts(
+        [
+            {
+                "id": p.get("id") or "",
+                "name": p.get("name") or "",
+                "text": p.get("text") or "",
+                "target_folder": p.get("target_folder") or "",
+            }
+            for p in prompts
+        ]
+    )
+    return PromptOrganizePlan(**plan)
+
+
+@app.post(
+    "/api/prompts/organize/apply",
+    response_model=Dict[str, Any],
+)
+def apply_organize_prompts(
+    plan: PromptOrganizePlan,
+    user: User = Depends(current_user),
+) -> Dict[str, Any]:
+    active_id = _active_account_id_for(user)
+    existing_by_id = {
+        p["id"]: p for p in list_prompts_for_account(active_id) if p.get("id")
+    }
+    ids_to_delete: List[str] = []
+    to_add: List[Dict[str, str]] = []
+    for action in plan.actions:
+        if action.type == "drop":
+            for pid in action.ids:
+                if pid not in existing_by_id:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"提示 {pid} 已不存在(可能被其他会话修改),请重新整理。",
+                    )
+                ids_to_delete.append(pid)
+        elif action.type == "merge":
+            if len(action.from_ids) < 2 or not action.new_text.strip():
+                continue
+            # Re-validate all source prompts still exist AND still share
+            # the same target_folder. If either changed, refuse — the
+            # plan is stale, user should re-run 一键整理.
+            targets = set()
+            for pid in action.from_ids:
+                p = existing_by_id.get(pid)
+                if p is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"提示 {pid} 已不存在(可能被其他会话修改),请重新整理。",
+                    )
+                targets.add((p.get("target_folder") or "").strip())
+            if len(targets) > 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"提示 {action.from_ids} 的 target_folder 不一致,拒绝合并。请重新整理。",
+                )
+            resolved_target = (action.target_folder or "").strip() or next(iter(targets), "")
+            for pid in action.from_ids:
+                ids_to_delete.append(pid)
+            to_add.append({
+                "name": (action.new_name or "").strip()[:48],
+                "text": action.new_text.strip()[:2000],
+                "target_folder": resolved_target,
+            })
+        # keep: no-op
+
+    for pid in ids_to_delete:
+        try:
+            delete_prompt(pid)
+        except Exception:  # noqa: BLE001
+            logger.warning("prompts organize/apply: failed to delete %s", pid)
+    added_ids: List[str] = []
+    for item in to_add:
+        rec = add_prompt(
+            {
+                "account_id": active_id,
+                "user_id": user.id,
+                "name": item["name"],
+                "text": item["text"],
+                "target_folder": item["target_folder"] or None,
+                "created_at": _now_iso(),
+                "updated_at": None,
+            }
+        )
+        if isinstance(rec, dict) and rec.get("id"):
+            added_ids.append(rec["id"])
+    return {
+        "status": "ok",
+        "deleted": len(ids_to_delete),
+        "merged_into": len(added_ids),
+        "added_ids": added_ids,
+    }
+
+
 @app.post(
     "/api/emails/{email_id}/importance-with-reason",
     response_model=ImportanceToggleResult,
@@ -1547,6 +1899,243 @@ def recategorize_with_reason(
     )
 
 
+# ── Auto-experience-on-recategorize ─────────────────────────────────
+# Called AFTER the email has already been moved to its new folder (via
+# right-click 移动到 X or drag-and-drop into folder X). The frontend does
+# not block the move on this — it fires-and-shows the suggestion modal in
+# parallel, so a slow LLM never delays the move. The single LLM call does
+# two things at once: generate a one-sentence candidate experience derived
+# from the move, AND check whether that candidate would duplicate an
+# already-stored experience for this account (LLM-based semantic match,
+# no fragile string-similarity threshold).
+
+
+@app.post(
+    "/api/emails/{email_id}/recategorize/suggest",
+    response_model=RecategorizeSuggestion,
+)
+def suggest_experience_for_recategorize(
+    email_id: str,
+    payload: RecategorizeSuggestRequest,
+    user: User = Depends(current_user),
+) -> RecategorizeSuggestion:
+    target = get_email(email_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="邮件不存在。")
+    _assert_record_belongs_to_user(target, user)
+    active_id = _active_account_id_for(user)
+
+    from app.services.spam_filter import suggest_recategorize_experience
+
+    existing = list_experiences_for_account(active_id)
+    existing_lite = [
+        {"id": e.get("id") or "", "text": e.get("text") or ""}
+        for e in existing
+        if (e.get("text") or "").strip()
+    ]
+    res = suggest_recategorize_experience(
+        from_category=payload.from_category or "",
+        to_category=payload.to_category or "",
+        from_email=target.get("from_email") or "",
+        to_email=target.get("to_email") or "",
+        subject=target.get("subject") or "",
+        body=target.get("body") or "",
+        existing_experiences=existing_lite,
+    )
+    # Denorm the duplicate's text for the modal so the UI doesn't need a
+    # second /experiences round-trip. Look up by id in the same in-memory
+    # list we sent to the LLM.
+    similar_text: Optional[str] = None
+    dup = res.get("duplicate_of")
+    if dup:
+        for e in existing_lite:
+            if e["id"] == dup:
+                similar_text = e["text"]
+                break
+        if similar_text is None:
+            # LLM referenced an id that vanished between the request and
+            # now — drop the duplicate hint so the frontend treats it as
+            # add-new.
+            dup = None
+    return RecategorizeSuggestion(
+        candidate_text=res.get("candidate_text") or "",
+        duplicate_of=dup,
+        similar_text=similar_text,
+        reason=res.get("reason") or "",
+        error=None if res.get("candidate_text") else res.get("reason") or "LLM 未返回候选经验",
+    )
+
+
+@app.post(
+    "/api/emails/{email_id}/recategorize/confirm",
+    response_model=Dict[str, Any],
+)
+def confirm_experience_for_recategorize(
+    email_id: str,
+    payload: RecategorizeConfirmRequest,
+    user: User = Depends(current_user),
+) -> Dict[str, Any]:
+    """Apply the user's decision from the suggestion modal:
+
+      - action=skip  → no-op, returns {status: "skipped"}
+      - action=reuse → validate reuse_id belongs to the account, no-op else
+      - action=add   → persist `text` as a new experience
+    """
+    target = get_email(email_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="邮件不存在。")
+    _assert_record_belongs_to_user(target, user)
+    active_id = _active_account_id_for(user)
+    action = (payload.action or "").strip().lower()
+    if action == "skip":
+        return {"status": "skipped"}
+    if action == "reuse":
+        rid = (payload.reuse_id or "").strip()
+        if not rid:
+            raise HTTPException(status_code=400, detail="reuse_id 缺失。")
+        # Confirm the reuse target still exists and belongs to this account.
+        for e in list_experiences_for_account(active_id):
+            if e.get("id") == rid:
+                return {"status": "reused", "experience_id": rid}
+        raise HTTPException(status_code=404, detail="要复用的经验不存在或已被删除。")
+    if action == "add":
+        text = (payload.text or "").strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="经验内容不能为空。")
+        record = add_experience(
+            {
+                "account_id": active_id,
+                "user_id": user.id,
+                "text": text[:240],
+                "source": "recategorize-auto",
+                "source_email_id": email_id,
+                "created_at": _now_iso(),
+                "updated_at": None,
+            }
+        )
+        return {
+            "status": "added",
+            "experience": _decorate_experience(record).model_dump(),
+        }
+    raise HTTPException(status_code=400, detail=f"未知的 action: {payload.action!r}")
+
+
+# ── Auto-experience-on-importance-toggle ────────────────────────────
+# Same shape as the recategorize auto-experience flow: frontend flips
+# the ⭐ flag via /update first (immediate feedback + optimistic UI),
+# THEN asks the backend to generate a candidate experience derived from
+# the flip AND check for duplicates against the account's existing
+# experience list — one LLM call does both. User picks add/reuse/skip
+# in the same suggestion modal.
+
+
+@app.post(
+    "/api/emails/{email_id}/importance/suggest",
+    response_model=RecategorizeSuggestion,
+)
+def suggest_experience_for_importance(
+    email_id: str,
+    payload: ImportanceSuggestRequest,
+    user: User = Depends(current_user),
+) -> RecategorizeSuggestion:
+    target = get_email(email_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="邮件不存在。")
+    _assert_record_belongs_to_user(target, user)
+    active_id = _active_account_id_for(user)
+
+    direction = (payload.direction or "").strip().lower()
+    if direction not in {"mark", "unmark"}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"direction 必须是 'mark' 或 'unmark',收到: {payload.direction!r}",
+        )
+
+    from app.services.spam_filter import suggest_importance_experience
+
+    existing = list_experiences_for_account(active_id)
+    existing_lite = [
+        {"id": e.get("id") or "", "text": e.get("text") or ""}
+        for e in existing
+        if (e.get("text") or "").strip()
+    ]
+    res = suggest_importance_experience(
+        direction=direction,
+        from_email=target.get("from_email") or "",
+        to_email=target.get("to_email") or "",
+        subject=target.get("subject") or "",
+        body=target.get("body") or "",
+        existing_experiences=existing_lite,
+    )
+    similar_text: Optional[str] = None
+    dup = res.get("duplicate_of")
+    if dup:
+        for e in existing_lite:
+            if e["id"] == dup:
+                similar_text = e["text"]
+                break
+        if similar_text is None:
+            dup = None
+    return RecategorizeSuggestion(
+        candidate_text=res.get("candidate_text") or "",
+        duplicate_of=dup,
+        similar_text=similar_text,
+        reason=res.get("reason") or "",
+        error=None if res.get("candidate_text") else res.get("reason") or "LLM 未返回候选经验",
+    )
+
+
+@app.post(
+    "/api/emails/{email_id}/importance/confirm",
+    response_model=Dict[str, Any],
+)
+def confirm_experience_for_importance(
+    email_id: str,
+    payload: RecategorizeConfirmRequest,
+    user: User = Depends(current_user),
+) -> Dict[str, Any]:
+    """Same three-way decision (add/reuse/skip) as the recategorize
+    confirm endpoint; only the `source` label on a newly-added
+    experience differs so 分类历史 / experience listings can tell where
+    the record came from."""
+    target = get_email(email_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="邮件不存在。")
+    _assert_record_belongs_to_user(target, user)
+    active_id = _active_account_id_for(user)
+    action = (payload.action or "").strip().lower()
+    if action == "skip":
+        return {"status": "skipped"}
+    if action == "reuse":
+        rid = (payload.reuse_id or "").strip()
+        if not rid:
+            raise HTTPException(status_code=400, detail="reuse_id 缺失。")
+        for e in list_experiences_for_account(active_id):
+            if e.get("id") == rid:
+                return {"status": "reused", "experience_id": rid}
+        raise HTTPException(status_code=404, detail="要复用的经验不存在或已被删除。")
+    if action == "add":
+        text = (payload.text or "").strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="经验内容不能为空。")
+        record = add_experience(
+            {
+                "account_id": active_id,
+                "user_id": user.id,
+                "text": text[:240],
+                "source": "importance-auto",
+                "source_email_id": email_id,
+                "created_at": _now_iso(),
+                "updated_at": None,
+            }
+        )
+        return {
+            "status": "added",
+            "experience": _decorate_experience(record).model_dump(),
+        }
+    raise HTTPException(status_code=400, detail=f"未知的 action: {payload.action!r}")
+
+
 @app.post(
     "/api/emails/{email_id}/generate-reply",
     response_model=ReplyGenerationResult,
@@ -1671,9 +2260,26 @@ def compile_fixed_rule(
     from app.services.rule_program import compile_from_nl
 
     active_id = _active_account_id_for(user)
+    # target_folder is now optional — an "importance-only" rule leaves it
+    # empty and only touches the ⭐ flag. See FixedRule docstring.
     target_folder = _normalize_target_folder(
-        payload.target_folder, active_id, required=True
-    )
+        payload.target_folder, active_id, required=False
+    ) or ""
+    if payload.mark_important and payload.unmark_important:
+        raise HTTPException(
+            status_code=400,
+            detail="mark_important 和 unmark_important 只能二选一。",
+        )
+    # A rule with no folder AND no importance directive would be a no-op:
+    # nothing to do on match. Reject early so the user can't save one.
+    if not target_folder and not payload.mark_important and not payload.unmark_important:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "规则至少要做一件事:选择目标文件夹,或勾选"
+                "「命中时标为重要 / 命中时取消重要」之一。"
+            ),
+        )
     _validate_name_format(payload.name)
 
     lookup = _build_name_lookup(
@@ -1699,6 +2305,7 @@ def compile_fixed_rule(
         expanded_nl=result["expanded_nl"],
         refs=result["refs"],
         mark_important=bool(payload.mark_important),
+        unmark_important=bool(payload.unmark_important),
     )
 
 
@@ -1731,8 +2338,21 @@ def create_fixed_rule(
 
     active_id = _active_account_id_for(user)
     target_folder = _normalize_target_folder(
-        payload.target_folder, active_id, required=True
-    )
+        payload.target_folder, active_id, required=False
+    ) or ""
+    if payload.mark_important and payload.unmark_important:
+        raise HTTPException(
+            status_code=400,
+            detail="mark_important 和 unmark_important 只能二选一。",
+        )
+    if not target_folder and not payload.mark_important and not payload.unmark_important:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "规则至少要做一件事:选择目标文件夹,或勾选"
+                "「命中时标为重要 / 命中时取消重要」之一。"
+            ),
+        )
     errs = validate_program(payload.program)
     if errs:
         raise HTTPException(
@@ -1766,6 +2386,7 @@ def create_fixed_rule(
             "refs": refs,
             "target_folder": target_folder,
             "mark_important": bool(payload.mark_important),
+            "unmark_important": bool(payload.unmark_important),
             "created_at": _now_iso(),
             "updated_at": None,
         }
@@ -1814,13 +2435,39 @@ def edit_fixed_rule(
             )
         fields["program"] = payload.program
     if payload.target_folder is not None:
+        # `""` explicitly clears the folder (rule becomes importance-only).
         fields["target_folder"] = _normalize_target_folder(
             payload.target_folder,
             existing.get("account_id") or "",
-            required=True,
-        )
+            required=False,
+        ) or ""
     if payload.mark_important is not None:
         fields["mark_important"] = bool(payload.mark_important)
+    if payload.unmark_important is not None:
+        fields["unmark_important"] = bool(payload.unmark_important)
+
+    # Reject the two impossible states: both importance flags set, or a
+    # rule with neither folder nor importance directive. We check against
+    # the merged view (existing + incoming fields).
+    def _eff(key: str, default=None):
+        return fields.get(key, existing.get(key, default))
+    if _eff("mark_important", False) and _eff("unmark_important", False):
+        raise HTTPException(
+            status_code=400,
+            detail="mark_important 和 unmark_important 只能二选一。",
+        )
+    if (
+        not _eff("target_folder", "")
+        and not _eff("mark_important", False)
+        and not _eff("unmark_important", False)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "规则至少要做一件事:选择目标文件夹,或勾选"
+                "「命中时标为重要 / 命中时取消重要」之一。"
+            ),
+        )
 
     # Cycle / missing-ref re-check against current account state.
     lookup = _build_name_lookup(
@@ -1940,12 +2587,21 @@ def _classification_context(account_id: str) -> Dict:
                 "_kind": "experience",
                 "_id": exp.get("id") or "",
             })
+    # `owner_email` is threaded into the LLM's user-message header so
+    # prompts / experiences that talk about "我" (the current user) —
+    # "发给我 vs 抄送给我" and the like — actually have a reference
+    # point to compare To/Cc against. Without it the classifier can't
+    # tell whose address is whose.
+    acc = get_account(account_id) or {}
+    settings = acc.get("settings") or {}
+    owner_email = str(settings.get("sender_email") or "").strip()
     return {
         "system_prompt": read_system_spam_prompt(),
         "user_prompts_with_targets": user_prompts,
         "fixed_rules": fixed_rules,
         "available_folders": read_folders(account_id),
         "field_config": _field_config_for_account(account_id).model_dump(),
+        "owner_email": owner_email,
     }
 
 
@@ -1994,6 +2650,764 @@ def classify_unsorted(user: User = Depends(current_user)) -> ClassifyUnsortedRes
     return ClassifyUnsortedResult(
         classified=classified, remaining=remaining, total=total
     )
+
+
+def _task_snapshot_to_info(task: task_registry.Task) -> TaskInfo:
+    s = task.snapshot()
+    return TaskInfo(**s)
+
+
+def _humanize_task_error(kind: str, exc: BaseException) -> str:
+    label = {
+        "receive": "收取邮件",
+        "classify_unsorted": "执行分类",
+        "reclassify_all": "重新分类",
+    }.get(kind, kind)
+    if kind == "receive":
+        return _humanize_email_error(label, exc)
+    return f"{label}失败: {exc.__class__.__name__}: {exc}"
+
+
+_CLASSIFY_FLUSH_EVERY = 10
+
+
+def _classify_worker_for_scope(
+    *,
+    active_id: str,
+    ctx: Dict[str, Any],
+    scope_filter,
+    reset_before_classify: bool,
+    task_id: str,
+    control: TaskControl,
+    label: str,
+) -> Dict[str, Any]:
+    """Common inner loop for both `classify_unsorted` and `reclassify_all`.
+    Extracted so the same pause/cancel logic serves both — the only
+    real difference is which records get picked up (scope_filter) and
+    whether we reset category/important before running the classifier.
+
+    Persists results incrementally in chunks of `_CLASSIFY_FLUSH_EVERY`
+    via `upsert_emails` so a force-quit / crash / TaskCancelled mid-run
+    keeps all completed chunks on disk (worst-case data loss = at most
+    the last un-flushed chunk of ≤10 LLM calls). Pause is fine either
+    way — it blocks the worker in-place, in-memory state stays intact
+    across resume. Terminal cancel is caught here so we flush the
+    partial chunk before re-raising."""
+    import traceback as _tb
+
+    task_registry.set_progress(
+        task_id, phase="loading", index=0, total=0,
+        skipped_count=0, changed=0,
+    )
+    # NOTE: we no longer keep `others` around — we mutate `scope` rows
+    # in place and upsert them; other-account rows stay untouched on disk.
+    all_emails = read_emails()
+    scope = [e for e in all_emails if scope_filter(e)]
+    total = len(scope)
+    task_registry.set_progress(
+        task_id, phase="processing", index=0, total=total,
+        skipped_count=0, changed=0, percent=0.0,
+    )
+
+    classified = 0
+    changed = 0
+    remaining = 0
+    skipped = 0
+    pending_flush: List[Dict[str, Any]] = []
+    last_flushed = 0
+
+    def flush_pending() -> None:
+        nonlocal last_flushed
+        if not pending_flush:
+            return
+        # One transaction per chunk — cheap, and it means the worker's
+        # progress is durable at each 10-email boundary.
+        upsert_emails(pending_flush)
+        last_flushed += len(pending_flush)
+        pending_flush.clear()
+
+    try:
+        for idx, rec in enumerate(scope):
+            control.check()
+            old_cat = rec.get("category") or ""
+            if reset_before_classify:
+                rec["category"] = UNCLASSIFIED
+                rec["important"] = False
+            try:
+                category, important, reason, trace = classify_email_record(
+                    from_email=rec.get("from_email") or "",
+                    to_email=rec.get("to_email") or "",
+                    cc_email=rec.get("cc_email") or "",
+                    subject=rec.get("subject") or "",
+                    body=rec.get("body") or "",
+                    attachments=[
+                        a.get("filename", "")
+                        for a in (rec.get("attachments") or [])
+                    ],
+                    **ctx,
+                )
+                if reset_before_classify:
+                    rec["category"] = category or UNCLASSIFIED
+                    rec["important"] = bool(important)
+                    rec["spam_reason"] = reason
+                    if rec["category"] != old_cat:
+                        changed += 1
+                else:
+                    if important and not rec.get("important"):
+                        rec["important"] = True
+                    if category and category != UNCLASSIFIED:
+                        rec["category"] = category
+                        rec["spam_reason"] = reason
+                        classified += 1
+                    else:
+                        rec["spam_reason"] = reason
+                        remaining += 1
+                _append_classification_trace(rec, trace)
+                # Queue for the next batch flush. Skipped-due-to-exception
+                # rows do NOT go into pending_flush — nothing changed, no
+                # need to overwrite the DB row with an identical copy.
+                pending_flush.append(rec)
+            except TaskCancelled:
+                raise
+            except Exception as per_email_exc:
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "%s: skipping email %s (idx %d/%d): %s\n%s",
+                    label, rec.get("id") or "?", idx + 1, total,
+                    per_email_exc, _tb.format_exc(),
+                )
+                skipped += 1
+                if not reset_before_classify:
+                    remaining += 1
+
+            if len(pending_flush) >= _CLASSIFY_FLUSH_EVERY:
+                flush_pending()
+
+            percent = ((idx + 1) / total * 100.0) if total else 0.0
+            last_event = {
+                "type": "classified",
+                "index": idx + 1,
+                "total": total,
+                "subject": rec.get("subject") or "",
+                "category": rec.get("category") or UNCLASSIFIED,
+            }
+            task_registry.set_progress(
+                task_id, index=idx + 1, total=total, percent=percent,
+                skipped_count=skipped, changed=changed,
+                saved_count=last_flushed + len(pending_flush),
+                last_event=last_event,
+            )
+    except TaskCancelled:
+        # User hit "取消". Flush whatever LLM work already succeeded
+        # so those calls aren't wasted, then propagate — the runner
+        # marks the task as cancelled.
+        try:
+            flush_pending()
+        except Exception:
+            # Persist-on-cancel is best-effort; a flush failure here
+            # shouldn't stop the cancel from taking effect.
+            pass
+        raise
+
+    task_registry.set_progress(task_id, phase="saving")
+    flush_pending()
+    return {
+        "total": total,
+        "classified": classified,
+        "changed": changed,
+        "remaining": remaining,
+        "skipped": skipped,
+    }
+
+
+# ==============================================================
+# Task-based long-running work (receive / classify / reclassify)
+# ==============================================================
+#
+# These endpoints run the work on a background thread whose lifetime is
+# independent of the HTTP client — so the task keeps going even when the
+# user navigates to /admin or /settings. The frontend polls
+# /api/tasks/active on page load to reattach the progress modal.
+
+@app.post("/api/tasks/receive/start", response_model=TaskInfo)
+def start_receive_task(
+    req: Optional[ReceiveTaskStartRequest] = None,
+    user: User = Depends(current_user),
+) -> TaskInfo:
+    """Start a background 收取邮件 task. If one is already running for this
+    user, returns it instead of spawning a duplicate."""
+    # Only one long-running task per user at a time: receive + classify
+    # both mutate the emails table (receive via upsert_emails per batch,
+    # classify via write_emails at end) and interleaving them can silently
+    # overwrite in-flight rows. If another task is running, hand back that
+    # one so the UI reopens its modal instead of spawning a conflict.
+    existing = task_registry.active_for(user.id)
+    if existing:
+        return _task_snapshot_to_info(existing)
+
+    acc = _active_account_for(user)
+    settings = acc["settings"]
+    active_id = acc["id"]
+    days = (req.days if req and req.days is not None else None)
+    if days is None:
+        sync_cfg = acc.get("sync") or {}
+        days = int(sync_cfg.get("fetch_days") or SyncSettings().fetch_days)
+    ctx = _classification_context(active_id)
+    sync_state = get_account_sync_state(active_id)
+    known_uids = list_known_imap_uids(active_id)
+
+    task = task_registry.create_task(
+        kind="receive", owner=user.id, label="收取邮件",
+    )
+    task_registry.set_progress(
+        task.id, phase="connecting", index=0, total=0,
+        skipped_count=0, cum_fetched=0, cum_stored=0,
+    )
+
+    def worker(control: TaskControl) -> Dict[str, Any]:
+        state = {"cum_fetched": 0, "cum_stored": 0, "skipped": 0}
+
+        def on_progress(ev: Dict[str, Any]) -> None:
+            typ = ev.get("type")
+            if typ == "connected":
+                task_registry.set_progress(task.id, phase="searching")
+            elif typ == "planned":
+                total = int(ev.get("total") or 0)
+                task_registry.set_progress(
+                    task.id, phase="processing",
+                    index=0, total=total, percent=0.0,
+                    mode=ev.get("mode") or "",
+                    days=ev.get("days") or 0,
+                    already_known=ev.get("already_known") or 0,
+                )
+            elif typ == "classified":
+                idx = int(ev.get("index") or 0)
+                total = int(ev.get("total") or 0)
+                percent = (idx / total * 100.0) if total else 0.0
+                task_registry.set_progress(
+                    task.id, index=idx, total=total, percent=percent,
+                    last_event={
+                        "type": "classified",
+                        "index": idx, "total": total,
+                        "subject": ev.get("subject") or "",
+                        "from": ev.get("from") or "",
+                        "category": ev.get("category") or "",
+                        "received_at": ev.get("received_at") or "",
+                    },
+                )
+            elif typ == "skipped":
+                state["skipped"] += 1
+                task_registry.set_progress(
+                    task.id,
+                    index=int(ev.get("index") or 0),
+                    total=int(ev.get("total") or 0),
+                    skipped_count=state["skipped"],
+                    last_event={
+                        "type": "skipped",
+                        "index": int(ev.get("index") or 0),
+                        "total": int(ev.get("total") or 0),
+                        "uid": ev.get("uid") or "",
+                        "reason": ev.get("reason") or "",
+                    },
+                )
+
+        def persist_batch(batch_records: List[Dict], partial_sync_meta: Dict[str, str]) -> None:
+            if not batch_records:
+                return
+            for item in batch_records:
+                item["account_id"] = active_id
+            own_old = list_emails_for_account(active_id)
+            merged, stored = dedupe_by_message_id(own_old, batch_records)
+
+            finalized: List[Dict] = []
+            for rec in merged:
+                pending = rec.pop("_pending_attachments", None) or []
+                if pending:
+                    for fname, data, ctype in pending:
+                        try:
+                            save_attachment_bytes(rec["id"], fname, data, ctype)
+                        except Exception:
+                            continue
+                    rec["attachments"] = list_attachments_meta(rec["id"])
+                finalized.append(rec)
+
+            upsert_emails(finalized)
+            if (
+                partial_sync_meta.get("mailbox")
+                and partial_sync_meta.get("uidvalidity")
+                and partial_sync_meta.get("last_uid")
+            ):
+                update_account_sync_state_entry(
+                    active_id,
+                    partial_sync_meta["mailbox"],
+                    partial_sync_meta["uidvalidity"],
+                    partial_sync_meta["last_uid"],
+                    partial_sync_meta.get("fetch_days_at", ""),
+                )
+            state["cum_fetched"] += len(batch_records)
+            state["cum_stored"] += stored
+            task_registry.set_progress(
+                task.id,
+                cum_fetched=state["cum_fetched"],
+                cum_stored=state["cum_stored"],
+            )
+
+        records, sync_meta = receive_emails(
+            settings=settings, days=days,
+            on_progress=on_progress, on_batch_ready=persist_batch,
+            batch_size=10, sync_state=sync_state, known_uids=known_uids,
+            on_yield=control.check, **ctx,
+        )
+
+        # Final sync_meta application (matches original stream endpoint's
+        # after-loop bump).
+        sm = sync_meta or {}
+        if sm.get("mailbox") and sm.get("uidvalidity") and sm.get("last_uid"):
+            update_account_sync_state_entry(
+                active_id, sm["mailbox"], sm["uidvalidity"],
+                sm["last_uid"], sm.get("fetch_days_at", ""),
+            )
+        task_registry.set_progress(task.id, phase="done")
+        return {
+            "fetched": state["cum_fetched"],
+            "stored": state["cum_stored"],
+            "skipped": state["skipped"],
+        }
+
+    def wrapped_worker(control: TaskControl) -> Dict[str, Any]:
+        try:
+            return worker(control)
+        except TaskCancelled:
+            raise
+        except Exception as exc:
+            # Match the humanised message the old stream endpoint produced.
+            task_registry.set_error(task.id, _humanize_task_error("receive", exc))
+            raise
+
+    task_registry.run_task(task, wrapped_worker)
+    return _task_snapshot_to_info(task)
+
+
+@app.post("/api/tasks/classify-unsorted/start", response_model=TaskInfo)
+def start_classify_unsorted_task(user: User = Depends(current_user)) -> TaskInfo:
+    """Start a background 执行分类 task over every 未分类 email for the
+    active account. Returns the existing task if one is already running."""
+    # See start_receive_task for why we forbid any concurrent task per user.
+    existing = task_registry.active_for(user.id)
+    if existing:
+        return _task_snapshot_to_info(existing)
+
+    active_id = _active_account_id_for(user)
+    ctx = _classification_context(active_id)
+    task = task_registry.create_task(
+        kind="classify_unsorted", owner=user.id, label="执行分类",
+    )
+
+    def scope_filter(rec: Dict) -> bool:
+        return (
+            rec.get("account_id") == active_id
+            and (rec.get("category") or "") == UNCLASSIFIED
+        )
+
+    def worker(control: TaskControl) -> Dict[str, Any]:
+        try:
+            return _classify_worker_for_scope(
+                active_id=active_id, ctx=ctx, scope_filter=scope_filter,
+                reset_before_classify=False, task_id=task.id, control=control,
+                label="classify-unsorted",
+            )
+        except TaskCancelled:
+            raise
+        except Exception as exc:
+            task_registry.set_error(task.id, _humanize_task_error("classify_unsorted", exc))
+            raise
+
+    task_registry.run_task(task, worker)
+    return _task_snapshot_to_info(task)
+
+
+@app.post("/api/tasks/reclassify-all/start", response_model=TaskInfo)
+def start_reclassify_all_task(user: User = Depends(current_user)) -> TaskInfo:
+    """Start a background 重新分类 task over every email for the active
+    account. Resets category+important before running the classifier —
+    the manual 重要 flag is intentionally cleared (see the old stream
+    endpoint's docstring)."""
+    # See start_receive_task for why we forbid any concurrent task per user.
+    existing = task_registry.active_for(user.id)
+    if existing:
+        return _task_snapshot_to_info(existing)
+
+    active_id = _active_account_id_for(user)
+    ctx = _classification_context(active_id)
+    task = task_registry.create_task(
+        kind="reclassify_all", owner=user.id, label="重新分类",
+    )
+
+    def scope_filter(rec: Dict) -> bool:
+        return rec.get("account_id") == active_id
+
+    def worker(control: TaskControl) -> Dict[str, Any]:
+        try:
+            return _classify_worker_for_scope(
+                active_id=active_id, ctx=ctx, scope_filter=scope_filter,
+                reset_before_classify=True, task_id=task.id, control=control,
+                label="reclassify-all",
+            )
+        except TaskCancelled:
+            raise
+        except Exception as exc:
+            task_registry.set_error(task.id, _humanize_task_error("reclassify_all", exc))
+            raise
+
+    task_registry.run_task(task, worker)
+    return _task_snapshot_to_info(task)
+
+
+class ReclassifyScopeStartRequest(BaseModel):
+    """Filter for the "reclassify emails in THIS scope" task.
+
+    `scope` picks the semantics:
+      * "folder"     — reclassify emails whose current category matches
+                       `folder`. Use "__all__" (or leave empty) for
+                       every inbox mail of the active account.
+      * "important"  — reclassify every currently-flagged-important email.
+    """
+    scope: str = "folder"
+    folder: str = ""
+
+
+@app.post("/api/tasks/reclassify-scope/start", response_model=TaskInfo)
+def start_reclassify_scope_task(
+    req: ReclassifyScopeStartRequest,
+    user: User = Depends(current_user),
+) -> TaskInfo:
+    """Reclassify only the emails matching a scope filter — used by the
+    folder-list right-click 「重新智能分类」 action. Same clean-slate
+    semantics as reclassify_all (reset category + important, then
+    re-run the classifier)."""
+    existing = task_registry.active_for(user.id)
+    if existing:
+        return _task_snapshot_to_info(existing)
+
+    active_id = _active_account_id_for(user)
+    ctx = _classification_context(active_id)
+
+    scope_kind = (req.scope or "folder").strip()
+    folder = (req.folder or "").strip()
+    if scope_kind == "important":
+        # Match the sidebar's ⭐ 重要 label exactly: important + NOT
+        # handled. Without the !handled clause we'd sweep in every
+        # archived "曾经重要" record — dozens or hundreds of extra
+        # LLM calls the user didn't ask for.
+        label = "重新分类:重要邮件"
+
+        def scope_filter(rec: Dict) -> bool:
+            return (
+                rec.get("account_id") == active_id
+                and bool(rec.get("important"))
+                and not bool(rec.get("handled"))
+                and not bool(rec.get("deleted"))
+            )
+    elif scope_kind == "formerly_important":
+        label = "重新分类:曾经重要"
+
+        def scope_filter(rec: Dict) -> bool:
+            return (
+                rec.get("account_id") == active_id
+                and bool(rec.get("important"))
+                and bool(rec.get("handled"))
+                and not bool(rec.get("deleted"))
+            )
+    elif scope_kind == "folder":
+        if not folder or folder == "__all__":
+            label = "重新分类:全部收件"
+
+            def scope_filter(rec: Dict) -> bool:
+                return (
+                    rec.get("account_id") == active_id
+                    and not bool(rec.get("deleted"))
+                )
+        else:
+            label = f"重新分类:{folder}"
+
+            def scope_filter(rec: Dict) -> bool:
+                return (
+                    rec.get("account_id") == active_id
+                    and (rec.get("category") or "") == folder
+                    and not bool(rec.get("deleted"))
+                )
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"未知的 scope: {req.scope!r}",
+        )
+
+    task = task_registry.create_task(
+        kind="reclassify_all", owner=user.id, label=label,
+    )
+
+    def worker(control: TaskControl) -> Dict[str, Any]:
+        try:
+            return _classify_worker_for_scope(
+                active_id=active_id, ctx=ctx, scope_filter=scope_filter,
+                reset_before_classify=True, task_id=task.id, control=control,
+                label=f"reclassify-scope:{scope_kind}:{folder or '*'}",
+            )
+        except TaskCancelled:
+            raise
+        except Exception as exc:
+            task_registry.set_error(task.id, _humanize_task_error("reclassify_all", exc))
+            raise
+
+    task_registry.run_task(task, worker)
+    return _task_snapshot_to_info(task)
+
+
+class AiSearchStartRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=2000)
+    start_date: str = Field(default="")   # ISO date "YYYY-MM-DD" (inclusive)
+    end_date: str = Field(default="")     # ISO date "YYYY-MM-DD" (inclusive)
+    # Optional scope narrowing. "folder" + "" or "__all__" means "every
+    # non-deleted inbox mail". "important" / "formerly_important" are
+    # rollup labels that filter on the ⭐ / handled flags directly.
+    scope_kind: str = Field(default="folder")
+    scope_folder: str = Field(default="")
+
+
+@app.post("/api/tasks/ai-search/start", response_model=TaskInfo)
+def start_ai_search_task(
+    req: AiSearchStartRequest,
+    user: User = Depends(current_user),
+) -> TaskInfo:
+    """Semantic search: iterate over the active account's emails in the
+    given date range, LLM-judges each against the natural-language
+    query, and streams a list of matching ids into task.result.
+    Progress + pause + cancel driven by the standard task modal."""
+    existing = task_registry.active_for(user.id)
+    if existing:
+        return _task_snapshot_to_info(existing)
+
+    active_id = _active_account_id_for(user)
+    acc = get_account(active_id) or {}
+    settings = acc.get("settings") or {}
+    owner_email = str(settings.get("sender_email") or "").strip()
+
+    # Date-range parsing. Empty → open-ended on that side. The received_at
+    # comparison uses ISO string prefix, which sorts lexicographically.
+    start_raw = (req.start_date or "").strip()
+    end_raw = (req.end_date or "").strip()
+    date_re = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    if start_raw and not date_re.match(start_raw):
+        raise HTTPException(status_code=400, detail=f"start_date 格式应为 YYYY-MM-DD: {start_raw}")
+    if end_raw and not date_re.match(end_raw):
+        raise HTTPException(status_code=400, detail=f"end_date 格式应为 YYYY-MM-DD: {end_raw}")
+    if start_raw and end_raw and start_raw > end_raw:
+        raise HTTPException(status_code=400, detail="start_date 不能晚于 end_date。")
+
+    # Scope validation. `scope_kind` narrows what the LLM even looks
+    # at — reduces cost and matches the user's mental model of
+    # "search THIS folder / label".
+    scope_kind = (req.scope_kind or "folder").strip().lower()
+    scope_folder = (req.scope_folder or "").strip()
+    known_folders = read_folders(active_id)
+    scope_label_bits: List[str] = []
+    if scope_kind == "folder":
+        if scope_folder and scope_folder != "__all__":
+            if scope_folder not in known_folders:
+                raise HTTPException(status_code=400, detail=f"未知文件夹: {scope_folder}")
+            scope_label_bits.append(scope_folder)
+    elif scope_kind == "important":
+        scope_label_bits.append("重要")
+    elif scope_kind == "formerly_important":
+        scope_label_bits.append("曾经重要")
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"未知的 scope_kind: {req.scope_kind!r}",
+        )
+
+    label = "智能检索"
+    if scope_label_bits:
+        label = f"智能检索:{'/'.join(scope_label_bits)}"
+
+    task = task_registry.create_task(
+        kind="ai_search", owner=user.id, label=label,
+    )
+    task_registry.set_progress(
+        task.id, phase="loading", index=0, total=0, matched=0,
+        query=req.query.strip()[:80],
+    )
+
+    from app.services.spam_filter import judge_email_matches_query
+
+    def _rec_in_scope(rec: Dict) -> bool:
+        """Apply scope_kind filter — orthogonal to date range."""
+        if scope_kind == "important":
+            return bool(rec.get("important")) and not bool(rec.get("handled"))
+        if scope_kind == "formerly_important":
+            return bool(rec.get("important")) and bool(rec.get("handled"))
+        # scope_kind == "folder"
+        if not scope_folder or scope_folder == "__all__":
+            return True
+        cat = (rec.get("category") or "")
+        # Match the folder itself and any sub-folder (using "/" separator
+        # like everywhere else in the UI).
+        return cat == scope_folder or cat.startswith(scope_folder + "/")
+
+    def worker(control: TaskControl) -> Dict[str, Any]:
+        emails = read_emails()
+        scope: List[Dict] = []
+        for rec in emails:
+            if rec.get("account_id") != active_id:
+                continue
+            if rec.get("deleted"):
+                continue
+            if not _rec_in_scope(rec):
+                continue
+            ra = str(rec.get("received_at") or "")
+            # received_at is ISO-8601 (may include timezone). Prefix
+            # match against 10-char date strings works because ISO-8601
+            # sorts lexicographically, and comparing prefix > full is
+            # equivalent to comparing full > full+"T…" for the endpoint.
+            day = ra[:10] if len(ra) >= 10 else ""
+            if start_raw and (not day or day < start_raw):
+                continue
+            if end_raw and (not day or day > end_raw):
+                continue
+            scope.append(rec)
+        total = len(scope)
+        matched_ids: List[str] = []
+        task_registry.set_progress(
+            task.id, phase="processing", index=0, total=total, matched=0,
+        )
+
+        for idx, rec in enumerate(scope):
+            control.check()
+            try:
+                res = judge_email_matches_query(
+                    query=req.query,
+                    from_email=rec.get("from_email") or "",
+                    to_email=rec.get("to_email") or "",
+                    cc_email=rec.get("cc_email") or "",
+                    subject=rec.get("subject") or "",
+                    body=rec.get("body") or "",
+                    owner_email=owner_email,
+                )
+            except TaskCancelled:
+                raise
+            except Exception as exc:
+                res = {"match": False, "reason": f"{exc.__class__.__name__}: {exc}"}
+            if res.get("match"):
+                matched_ids.append(rec.get("id") or "")
+                task_registry.set_progress(
+                    task.id,
+                    last_match={
+                        "id": rec.get("id") or "",
+                        "subject": rec.get("subject") or "",
+                        "from": rec.get("from_email") or "",
+                        "received_at": rec.get("received_at") or "",
+                        "reason": res.get("reason") or "",
+                    },
+                )
+            percent = ((idx + 1) / total * 100.0) if total else 0.0
+            task_registry.set_progress(
+                task.id, index=idx + 1, total=total, percent=percent,
+                matched=len(matched_ids),
+                last_event={
+                    "type": "checked",
+                    "index": idx + 1,
+                    "total": total,
+                    "subject": rec.get("subject") or "",
+                    "matched": bool(res.get("match")),
+                },
+            )
+        return {
+            "total": total,
+            "matched": len(matched_ids),
+            "matched_ids": matched_ids,
+        }
+
+    def wrapped(control: TaskControl) -> Dict[str, Any]:
+        try:
+            return worker(control)
+        except TaskCancelled:
+            raise
+        except Exception as exc:
+            task_registry.set_error(task.id, f"智能检索失败: {exc.__class__.__name__}: {exc}")
+            raise
+
+    task_registry.run_task(task, wrapped)
+    return _task_snapshot_to_info(task)
+
+
+@app.get("/api/tasks/active", response_model=ActiveTaskResponse)
+def get_active_task(user: User = Depends(current_user)) -> ActiveTaskResponse:
+    """The user's most recent non-terminal task, or the most recent
+    just-finished task (so the UI can render its summary before the user
+    dismisses it)."""
+    t = task_registry.active_for(user.id)
+    if not t:
+        # Also expose a recently-finished task so the modal can show the
+        # summary line after completion.
+        latest = task_registry.latest_for(user.id)
+        if latest and latest.finished_at:
+            # Only if the finish was recent (last 10 minutes) — older
+            # finished tasks are considered acknowledged implicitly.
+            import time as _t
+            if _t.time() - latest.finished_at < 600:
+                return ActiveTaskResponse(task=_task_snapshot_to_info(latest))
+        return ActiveTaskResponse(task=None)
+    return ActiveTaskResponse(task=_task_snapshot_to_info(t))
+
+
+@app.get("/api/tasks/{task_id}", response_model=TaskInfo)
+def get_task_status(task_id: str, user: User = Depends(current_user)) -> TaskInfo:
+    t = task_registry.get_task(task_id)
+    if not t or t.owner != user.id:
+        raise HTTPException(status_code=404, detail="任务不存在。")
+    return _task_snapshot_to_info(t)
+
+
+@app.post("/api/tasks/{task_id}/pause", response_model=TaskInfo)
+def pause_task(task_id: str, user: User = Depends(current_user)) -> TaskInfo:
+    t = task_registry.get_task(task_id)
+    if not t or t.owner != user.id:
+        raise HTTPException(status_code=404, detail="任务不存在。")
+    task_registry.pause(task_id)
+    t = task_registry.get_task(task_id)
+    return _task_snapshot_to_info(t)
+
+
+@app.post("/api/tasks/{task_id}/resume", response_model=TaskInfo)
+def resume_task(task_id: str, user: User = Depends(current_user)) -> TaskInfo:
+    t = task_registry.get_task(task_id)
+    if not t or t.owner != user.id:
+        raise HTTPException(status_code=404, detail="任务不存在。")
+    task_registry.resume(task_id)
+    t = task_registry.get_task(task_id)
+    return _task_snapshot_to_info(t)
+
+
+@app.post("/api/tasks/{task_id}/cancel", response_model=TaskInfo)
+def cancel_task(task_id: str, user: User = Depends(current_user)) -> TaskInfo:
+    t = task_registry.get_task(task_id)
+    if not t or t.owner != user.id:
+        raise HTTPException(status_code=404, detail="任务不存在。")
+    task_registry.cancel(task_id)
+    t = task_registry.get_task(task_id)
+    return _task_snapshot_to_info(t)
+
+
+@app.post("/api/tasks/{task_id}/ack")
+def ack_task(task_id: str, user: User = Depends(current_user)) -> Dict[str, bool]:
+    """Drop a terminal task from the registry so /api/tasks/active stops
+    returning it. The frontend calls this after the user dismisses the
+    completion state of the progress modal."""
+    t = task_registry.get_task(task_id)
+    if not t or t.owner != user.id:
+        raise HTTPException(status_code=404, detail="任务不存在。")
+    ok = task_registry.acknowledge(task_id)
+    return {"ok": ok}
 
 
 @app.post("/api/classify-unsorted/stream")
@@ -2677,20 +4091,63 @@ def send_mail(
             status_code=400, detail="收件人（To）至少要有一个有效地址。"
         )
 
-    try:
-        raw_message = send_email(
-            settings,
-            payload.to,
-            payload.subject,
-            payload.body,
-            attachments=send_attachments,
-            cc=payload.cc or "",
-            bcc=payload.bcc or "",
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500, detail=_humanize_email_error("发送邮件", exc)
-        ) from exc
+    # Two send modes:
+    #   • "grouped" (default): a single wire message with the full
+    #     To/Cc/Bcc list — normal email.
+    #   • "independent": one wire message per unique recipient across
+    #     To/Cc/Bcc, each showing only that recipient in the To field
+    #     (Cc/Bcc empty). Lets the user do group notifications
+    #     without leaking the recipient list.
+    raw_message = ""
+    independent_raws: List[str] = []
+    if payload.send_independently:
+        # Deduplicate across To + Cc + Bcc; preserve first-seen order.
+        seen_addrs: set = set()
+        indep_targets: List[str] = []
+        for src in (_to_addrs, _cc_addrs, _bcc_addrs):
+            for addr in src:
+                key = addr.lower()
+                if key not in seen_addrs:
+                    seen_addrs.add(key)
+                    indep_targets.append(addr)
+        if not indep_targets:
+            raise HTTPException(status_code=400, detail="收件人不能为空。")
+        for addr in indep_targets:
+            try:
+                one_raw = send_email(
+                    settings,
+                    addr,
+                    payload.subject,
+                    payload.body,
+                    attachments=send_attachments,
+                    cc="",
+                    bcc="",
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=500,
+                    detail=_humanize_email_error(f"发送邮件到 {addr}", exc),
+                ) from exc
+            independent_raws.append(one_raw)
+        # For the "mirror to server Sent folder" step below, pick the
+        # first raw as a representative — IMAP APPEND N times would be
+        # a lot of round-trips for the same body content.
+        raw_message = independent_raws[0] if independent_raws else ""
+    else:
+        try:
+            raw_message = send_email(
+                settings,
+                payload.to,
+                payload.subject,
+                payload.body,
+                attachments=send_attachments,
+                cc=payload.cc or "",
+                bcc=payload.bcc or "",
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=_humanize_email_error("发送邮件", exc)
+            ) from exc
 
     # Best-effort: mirror the sent message into the server's Sent folder.
     if _sync_settings_for(user).sync_sent and raw_message:
@@ -2724,6 +4181,7 @@ def send_mail(
         "reply_to_inbox_id": payload.reply_to_inbox_id or None,
         "source_message_id": thread_source,
         "in_reply_to": thread_in_reply_to,
+        "send_mode": "independent" if payload.send_independently else "grouped",
     }
 
     # Relocate attachments to the sent folder (and merge in inbox carry-over).

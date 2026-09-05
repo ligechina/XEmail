@@ -388,18 +388,36 @@ def compile_from_nl(
     # as an immediate cycle via the self_name seed; no extra handling needed.
     expanded, refs = expand_refs(text, lookup, self_name=self_name or "")
 
-    payload = {
-        "messages": [
-            {"role": "system", "content": _COMPILE_SYSTEM_PROMPT},
-            {"role": "user", "content": expanded},
-        ],
-        "temperature": 0.0,
-        "max_tokens": 800,
-        "response_format": {"type": "json_object"},
-    }
+    # DeepSeek v4-flash is a reasoning model: `max_tokens` covers BOTH
+    # internal reasoning tokens AND visible output. An 800-token budget
+    # is trivially exhausted on any non-trivial NL rule (reasoning eats
+    # the whole thing, `content` comes back empty, chat_completion
+    # raises `empty content in response`). Start at 4k and escalate to
+    # 8k on empty — same pattern as classify_via_llm / suggest_*.
+    def _run(max_tokens: int, timeout: int) -> str:
+        payload = {
+            "messages": [
+                {"role": "system", "content": _COMPILE_SYSTEM_PROMPT},
+                {"role": "user", "content": expanded},
+            ],
+            "temperature": 0.0,
+            "max_tokens": max_tokens,
+            "response_format": {"type": "json_object"},
+        }
+        return chat_completion(payload, timeout=timeout)
 
     try:
-        content = chat_completion(payload, timeout=30)
+        content = _run(max_tokens=4000, timeout=60)
+    except ValueError as exc:
+        if "empty content" not in str(exc):
+            raise RuntimeError(f"调用 DeepSeek 失败：{exc}")
+        logger.warning("rule_program.compile: empty at 4k, retry at 8k")
+        try:
+            content = _run(max_tokens=8000, timeout=120)
+        except Exception as exc2:
+            raise RuntimeError(
+                f"大模型在扩大预算后仍未产出规则内容,请稍后重试或简化描述:{exc2}"
+            )
     except RuntimeError as exc:
         if str(exc) == "no api key":
             raise RuntimeError(

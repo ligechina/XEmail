@@ -65,7 +65,8 @@ def is_api_key_configured() -> bool:
 
 _DEFAULT_FIELD_CONFIG: Dict = {
     "include_from": True,
-    "include_to": False,
+    "include_to": True,
+    "include_cc": True,
     "include_subject": True,
     "include_body": True,
     "include_attachments": False,
@@ -152,13 +153,27 @@ def _build_user_content(
     body: str,
     attachments: Optional[List[str]],
     cfg: Dict,
+    *,
+    cc_email: str = "",
+    owner_email: str = "",
 ) -> str:
-    """Assemble the user-message payload according to the field config."""
+    """Assemble the user-message payload according to the field config.
+
+    `owner_email`, when supplied, is placed at the top so prompts /
+    experiences that reason about "我" (the current user) — e.g.
+    "发给我 vs 抄送我" — actually have a reference point. Without it
+    the LLM has no way to tell whether a To/Cc address is the user's
+    own or somebody else's.
+    """
     parts: List[str] = []
+    if owner_email:
+        parts.append(f"（当前账号邮箱: {owner_email}）")
     if cfg.get("include_from", True):
         parts.append(f"发件人: {from_email or '(unknown)'}")
-    if cfg.get("include_to", False):
-        parts.append(f"收件人: {to_email or '(unknown)'}")
+    if cfg.get("include_to", True):
+        parts.append(f"收件人(To): {to_email or '(unknown)'}")
+    if cfg.get("include_cc", True):
+        parts.append(f"抄送(Cc): {cc_email or '(无)'}")
     if cfg.get("include_subject", True):
         parts.append(f"主题: {subject or '(empty)'}")
     if cfg.get("include_attachments", False):
@@ -178,6 +193,8 @@ def classify_via_llm(
     body: str,
     *,
     to_email: str = "",
+    cc_email: str = "",
+    owner_email: str = "",
     attachments: Optional[List[str]] = None,
     system_prompt: Optional[str] = None,
     user_prompts_with_targets: Optional[List[Dict[str, Optional[str]]]] = None,
@@ -200,13 +217,23 @@ def classify_via_llm(
 
     cfg = {**_DEFAULT_FIELD_CONFIG, **(field_config or {})}
     user_content = _build_user_content(
-        from_email, to_email, subject, body, attachments, cfg
+        from_email, to_email, subject, body, attachments, cfg,
+        cc_email=cc_email, owner_email=owner_email,
     )
 
     composed_system = _compose_system_prompt(
         system_prompt, user_prompts_with_targets, available_folders
     )
 
+    # 4000 tokens is way more than the ~80-token JSON payload needs, but
+    # DeepSeek v4-flash is a reasoning model — hidden `reasoning_tokens`
+    # eat from the same max_tokens allowance before any visible content
+    # comes out. The old 160-token budget was being 100% consumed by
+    # reasoning on any non-trivial email, causing chat_completion to raise
+    # `empty content in response`. That single misconfiguration was
+    # responsible for ~90% of 未分类 mail in observed real corpora. The
+    # per-token cost of unused headroom is zero; the cost of an under-
+    # budget reasoning burn is a whole email misfiled.
     payload = {
         "model": _MODEL,
         "messages": [
@@ -214,12 +241,15 @@ def classify_via_llm(
             {"role": "user", "content": user_content},
         ],
         "temperature": 0.0,
-        "max_tokens": 160,
+        "max_tokens": 4000,
         "response_format": {"type": "json_object"},
     }
 
     last_err = ""
-    for attempt in range(2):
+    # 3 attempts: two at 4k, one at 8k (doubles the reasoning budget in
+    # case a particularly gnarly email needs more thinking). Each retry
+    # sleeps 1s between attempts.
+    for attempt in range(3):
         try:
             cat, important, reason = _call(api_key, payload)
             return (
@@ -232,7 +262,12 @@ def classify_via_llm(
             logger.warning(
                 "classifier call failed (attempt %d): %s", attempt + 1, last_err
             )
-            if attempt == 0:
+            # Escalate budget after the first empty-content failure so a
+            # single re-run is likely to succeed rather than falling all
+            # the way through to 未分类.
+            if "empty content" in last_err and payload["max_tokens"] < 8000:
+                payload = {**payload, "max_tokens": 8000}
+            if attempt < 2:
                 time.sleep(1.0)
 
     return "", False, f"llm error: {last_err}"
@@ -376,6 +411,384 @@ def distill_category_experience(
     return text[:240]
 
 
+def suggest_recategorize_experience(
+    *,
+    from_category: str,
+    to_category: str,
+    from_email: str = "",
+    to_email: str = "",
+    subject: str = "",
+    body: str = "",
+    existing_experiences: Optional[List[Dict[str, str]]] = None,
+    body_char_cap: int = 800,
+) -> Dict:
+    """A single LLM call that does two things at once:
+      1. Generate a one-sentence classification-experience candidate from
+         the user's implicit action (moved email from category X to Y).
+      2. Compare against the account's existing experiences and decide
+         whether the new candidate would be a semantic duplicate — if so,
+         which existing id best covers it.
+
+    Returns:
+        {
+          "candidate_text": "...",         # empty on total LLM failure
+          "duplicate_of": "x_..." | None,  # id of existing experience
+                                            # that already covers this case
+          "reason": "..."                  # short explanation (why dup or
+                                            # what pattern the candidate captures)
+        }
+
+    Never raises; on any error returns {"candidate_text": "", "duplicate_of": None,
+    "reason": "..."} so the caller can fall back to a no-op or plain move.
+    """
+    from_label = (from_category or "").strip() or "未分类"
+    to_label = (to_category or "").strip() or "(未指定)"
+    body_excerpt = (body or "")[:max(0, body_char_cap)]
+
+    existing = existing_experiences or []
+    if existing:
+        existing_block = "\n".join(
+            f"[{e.get('id')}] {(e.get('text') or '').strip()}" for e in existing
+        )
+    else:
+        existing_block = "(none)"
+
+    system_msg = (
+        "你是「分类经验生成 + 去重」助手。根据用户刚刚对一封邮件做的分类调整,"
+        "生成一条通用的分类经验(≤80 字中文),同时检查这条经验是否与用户账号中"
+        "已有的某条经验语义重复;若重复,返回该已有经验的 id 建议用户复用,不必新增。"
+    )
+    user_msg = (
+        f"用户把一封邮件从「{from_label}」移动到「{to_label}」。\n\n"
+        f"邮件主题: {subject or '(无)'}\n"
+        f"发件人: {from_email or '(unknown)'}\n"
+        f"收件人: {to_email or '(unknown)'}\n"
+        f"正文摘录:\n{body_excerpt or '(无)'}\n\n"
+        f"账号现有经验列表(格式:[id] 文本):\n{existing_block}\n\n"
+        "请输出**严格 JSON**,顶级只包含以下字段:\n"
+        '{\n'
+        '  "candidate_text": "<一句中文经验,≤80 字,聚焦邮件特征 + 目标分类>",\n'
+        '  "duplicate_of":   "<现有经验 id> 或 null>",\n'
+        '  "reason":         "<20 字内说明:为何判定重复,或候选捕获的是什么特征>"\n'
+        '}\n\n'
+        "判断重复的标准:如果现有经验已经能覆盖这次调整背后的规则(即用户下次遇到"
+        "同类邮件时,原有经验会让系统做出正确分类),则填 duplicate_of;否则填 null。\n"
+        "❗ candidate_text 一律要生成,即使 duplicate_of 非 null 也要写(供用户参考)。\n"
+        "❗ 不要输出 JSON 以外的任何字符,不要 Markdown 代码块。"
+    )
+    # Reasoning-model budget: 6k → escalate to 12k on empty-content (v4-flash
+    # burns a variable amount of thinking budget depending on the existing-
+    # experiences list length; a 30-item list can eat past 6k).
+    def _run(max_tokens: int, timeout: int) -> str:
+        payload = {
+            "messages": [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ],
+            "temperature": 0.1,
+            "max_tokens": max_tokens,
+        }
+        return chat_completion(payload, timeout=timeout).strip()
+
+    try:
+        raw = _run(max_tokens=6000, timeout=90)
+    except ValueError as exc:
+        if "empty content" not in str(exc):
+            logger.warning("suggest_recategorize_experience call failed: %s", exc)
+            return {"candidate_text": "", "duplicate_of": None,
+                    "reason": f"LLM 失败:{exc}"}
+        logger.warning("suggest_recategorize_experience: empty at 6k, retry at 12k")
+        try:
+            raw = _run(max_tokens=12000, timeout=180)
+        except Exception as exc2:
+            logger.warning("suggest_recategorize_experience retry failed: %s", exc2)
+            return {"candidate_text": "", "duplicate_of": None,
+                    "reason": f"LLM 失败(重试后仍无输出):{exc2}"}
+    except Exception as exc:
+        logger.warning("suggest_recategorize_experience call failed: %s", exc)
+        return {"candidate_text": "", "duplicate_of": None,
+                "reason": f"LLM 失败:{exc}"}
+    if raw.startswith("```"):
+        lines = raw.split("\n")
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        raw = "\n".join(lines).strip()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        logger.warning("suggest_recategorize_experience JSON parse failed: %s | raw=%s",
+                       exc, raw[:400])
+        return {"candidate_text": "", "duplicate_of": None,
+                "reason": "LLM 返回不是合法 JSON"}
+    if not isinstance(parsed, dict):
+        return {"candidate_text": "", "duplicate_of": None,
+                "reason": "LLM 返回结构非对象"}
+    # Validate + defense: duplicate_of must be a real id from the input
+    # list; the LLM may hallucinate. If it does, drop it silently — the
+    # experience will be added as new.
+    dup = parsed.get("duplicate_of")
+    if isinstance(dup, str):
+        dup = dup.strip() or None
+        if dup and existing and not any(e.get("id") == dup for e in existing):
+            dup = None
+    else:
+        dup = None
+    text = (parsed.get("candidate_text") or "").strip().strip("「」\"'").strip()
+    if text.startswith(("- ", "• ", "* ")):
+        text = text[2:].strip()
+    return {
+        "candidate_text": text[:240],
+        "duplicate_of": dup,
+        "reason": (parsed.get("reason") or "").strip()[:200],
+    }
+
+
+def suggest_importance_experience(
+    *,
+    direction: str,  # "mark" | "unmark"
+    from_email: str = "",
+    to_email: str = "",
+    subject: str = "",
+    body: str = "",
+    existing_experiences: Optional[List[Dict[str, str]]] = None,
+    body_char_cap: int = 800,
+) -> Dict:
+    """Same shape as suggest_recategorize_experience, but for the ⭐ ← flip.
+    The user just marked (or unmarked) an email as important; generate a
+    one-sentence rule that would let the classifier make the same call
+    on future mail, and check for semantic overlap with existing
+    experiences. Returns the same {candidate_text, duplicate_of, reason}
+    dict — never raises."""
+    action_label = "标为「重要」" if direction == "mark" else "取消「重要」标记"
+    goal_hint = (
+        "识别哪类邮件应当被标为重要"
+        if direction == "mark"
+        else "识别哪类邮件不应该被标为重要"
+    )
+    body_excerpt = (body or "")[:max(0, body_char_cap)]
+
+    existing = existing_experiences or []
+    if existing:
+        existing_block = "\n".join(
+            f"[{e.get('id')}] {(e.get('text') or '').strip()}" for e in existing
+        )
+    else:
+        existing_block = "(none)"
+
+    system_msg = (
+        "你是「重要邮件经验生成 + 去重」助手。用户刚刚对一封邮件做了 ⭐ 重要标签"
+        "的调整;根据邮件本身的特征,推断出用户的判断逻辑,生成一条通用的判断"
+        "经验(≤80 字中文),用来指导系统对未来同类邮件做出相同判断。同时检查这条"
+        "经验是否与用户账号中已有的某条经验语义重复;若重复,返回该已有经验的 id "
+        "建议用户复用。"
+    )
+    user_msg = (
+        f"用户对一封邮件执行了 {action_label} 的操作(目标:{goal_hint})。\n\n"
+        f"邮件主题: {subject or '(无)'}\n"
+        f"发件人: {from_email or '(unknown)'}\n"
+        f"收件人: {to_email or '(unknown)'}\n"
+        f"正文摘录:\n{body_excerpt or '(无)'}\n\n"
+        f"账号现有经验列表(格式:[id] 文本):\n{existing_block}\n\n"
+        "请输出**严格 JSON**,顶级只包含以下字段:\n"
+        '{\n'
+        '  "candidate_text": "<一句中文经验,≤80 字,聚焦邮件特征 + 重要 or 不重要>",\n'
+        '  "duplicate_of":   "<现有经验 id> 或 null>",\n'
+        '  "reason":         "<20 字内说明:为何判定重复,或候选捕获的是什么特征>"\n'
+        '}\n\n'
+        "判断重复的标准:如果现有经验已经能覆盖这次调整背后的规则,则填 duplicate_of;否则填 null。\n"
+        "❗ candidate_text 一律要生成,即使 duplicate_of 非 null 也要写(供用户参考)。\n"
+        "❗ 不要输出 JSON 以外的任何字符,不要 Markdown 代码块。"
+    )
+
+    def _run(max_tokens: int, timeout: int) -> str:
+        payload = {
+            "messages": [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ],
+            "temperature": 0.1,
+            "max_tokens": max_tokens,
+        }
+        return chat_completion(payload, timeout=timeout).strip()
+
+    try:
+        raw = _run(max_tokens=6000, timeout=90)
+    except ValueError as exc:
+        if "empty content" not in str(exc):
+            logger.warning("suggest_importance_experience call failed: %s", exc)
+            return {"candidate_text": "", "duplicate_of": None,
+                    "reason": f"LLM 失败:{exc}"}
+        logger.warning("suggest_importance_experience: empty at 6k, retry at 12k")
+        try:
+            raw = _run(max_tokens=12000, timeout=180)
+        except Exception as exc2:
+            logger.warning("suggest_importance_experience retry failed: %s", exc2)
+            return {"candidate_text": "", "duplicate_of": None,
+                    "reason": f"LLM 失败(重试后仍无输出):{exc2}"}
+    except Exception as exc:
+        logger.warning("suggest_importance_experience call failed: %s", exc)
+        return {"candidate_text": "", "duplicate_of": None,
+                "reason": f"LLM 失败:{exc}"}
+    if raw.startswith("```"):
+        lines = raw.split("\n")
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        raw = "\n".join(lines).strip()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        logger.warning("suggest_importance_experience JSON parse failed: %s | raw=%s",
+                       exc, raw[:400])
+        return {"candidate_text": "", "duplicate_of": None,
+                "reason": "LLM 返回不是合法 JSON"}
+    if not isinstance(parsed, dict):
+        return {"candidate_text": "", "duplicate_of": None,
+                "reason": "LLM 返回结构非对象"}
+    dup = parsed.get("duplicate_of")
+    if isinstance(dup, str):
+        dup = dup.strip() or None
+        if dup and existing and not any(e.get("id") == dup for e in existing):
+            dup = None
+    else:
+        dup = None
+    text = (parsed.get("candidate_text") or "").strip().strip("「」\"'").strip()
+    if text.startswith(("- ", "• ", "* ")):
+        text = text[2:].strip()
+    return {
+        "candidate_text": text[:240],
+        "duplicate_of": dup,
+        "reason": (parsed.get("reason") or "").strip()[:200],
+    }
+
+
+# How many experiences per LLM call. Output is now "changes only"
+# (merges + drops; unmentioned = keep), which shrinks the required
+# response size a lot — so we can fit more per call without blowing
+# the reasoning-model budget. 25 items per chunk empirically completes
+# under a 16k budget; a 24k retry catches the rare over-reasoner.
+_ORGANIZE_CHUNK_SIZE = 25
+
+
+def _distill_organize_one_chunk(experiences: List[Dict[str, str]]) -> Dict:
+    """Run the organize LLM call on ONE chunk of experiences.
+    Returns {actions: [...]} on success, {actions: [], error: "..."} on
+    failure. Never raises. Kept private — callers should go through
+    distill_organize_experiences which handles chunking + merging.
+
+    Output contract: the LLM lists ONLY the ids to merge or drop;
+    every id it doesn't mention is treated as an implicit keep by
+    distill_organize_experiences. This shrinks response size (fewer
+    ids to echo, no reason strings on kept items) and — more
+    importantly — means the LLM never has to enumerate 20+ ids just
+    to say "keep them all". Reasoning-token burn drops accordingly.
+    """
+    if not experiences:
+        return {"actions": []}
+    lines = [f"[{e.get('id')}] {(e.get('text') or '').strip()}" for e in experiences]
+    corpus = "\n".join(lines)
+    system_msg = (
+        "你是「经验条目整理助手」,任务是**精简**用户的邮件分类经验列表。\n"
+        "核心原则:**宁愿丢失一些经验也要显著减少条目数**。用户已经明确表示"
+        "偏好更精简的列表,而不是「更全」的列表。\n"
+        "执行策略:\n"
+        "1. 只要两条经验的适用场景有明显重叠 → 合并成一条更通用的表述(merge)\n"
+        "2. 若某条经验被另一条(哪怕更宽泛的)大致覆盖 → 直接删除较弱的一条(drop)\n"
+        "3. 意思相反 / 存在冲突 → 只保留更具体或更近期的一条,另一条 drop\n"
+        "4. 只有当一条经验独一无二、没有任何近似邻居时才让它保留\n"
+        "5. **合并 3~4 条相近经验为 1 条,是非常受欢迎的做法**\n"
+        "6. 拿不准是否重要 → 倾向 drop(用户已授权你偏激进)"
+    )
+    user_msg = (
+        f"以下是当前经验列表({len(experiences)} 条),格式为 [id] 文本:\n\n"
+        f"{corpus}\n\n"
+        "请返回严格 JSON,顶级只有一个键 `actions`,值为数组。**只列出要合并或"
+        "删除的动作;未在输出里出现的 id 会自动保留原样,不需要你写 keep**。\n\n"
+        "示例:\n"
+        "```\n"
+        "{\n"
+        '  "actions": [\n'
+        '    {"type":"merge", "from_ids":["x_1","x_2","x_3"], "new_text":"合并后一句 ≤80 字"},\n'
+        '    {"type":"drop",  "ids":["x_5"], "reason":"被 x_6 覆盖"}\n'
+        "  ]\n"
+        "}\n"
+        "```\n"
+        "❌ 不要输出 keep 动作,不要用 `{merge:[...], drop:[...]}` 这种把 type "
+        "当作顶级键的形式。\n"
+        "❌ 不要输出 JSON 以外的任何字符或 Markdown 代码块。\n"
+        "❌ merge 至少要合并 2 条(from_ids 长度 ≥ 2);drop 每次可以 1 条起。\n"
+        "✅ 尽量多合并、多删除。目标是让最终条目数至少减少 30%。"
+    )
+
+    def _run(max_tokens: int, timeout: int) -> str:
+        payload = {
+            "messages": [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ],
+            "temperature": 0.1,
+            "max_tokens": max_tokens,
+        }
+        return chat_completion(payload, timeout=timeout).strip()
+
+    # v4-flash reasoning-model budget: start at 16k; on empty-content
+    # (reasoning burned the whole budget) escalate to 24k. This mirrors
+    # the pattern in suggest_recategorize_experience.
+    try:
+        raw = _run(max_tokens=16000, timeout=180)
+    except ValueError as exc:
+        if "empty content" not in str(exc):
+            logger.warning("organize chunk failed (%d items): %s", len(experiences), exc)
+            return {"actions": [], "error": str(exc)}
+        logger.warning("organize chunk (%d items): empty at 16k, retry at 24k", len(experiences))
+        try:
+            raw = _run(max_tokens=24000, timeout=300)
+        except Exception as exc2:
+            logger.warning("organize chunk retry failed: %s", exc2)
+            return {"actions": [], "error": f"LLM 在扩大预算后仍无输出: {exc2}"}
+    except Exception as exc:
+        logger.warning("organize chunk failed (%d items): %s", len(experiences), exc)
+        return {"actions": [], "error": str(exc)}
+    # Strip accidental code fences.
+    if raw.startswith("```"):
+        lines2 = raw.split("\n")
+        if lines2 and lines2[0].startswith("```"):
+            lines2 = lines2[1:]
+        if lines2 and lines2[-1].strip().startswith("```"):
+            lines2 = lines2[:-1]
+        raw = "\n".join(lines2).strip()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        logger.warning("organize chunk JSON parse failed: %s | raw=%s", exc, raw[:400])
+        return {"actions": [], "error": "JSON parse failed"}
+    if not isinstance(parsed, dict):
+        return {"actions": [], "error": "invalid response shape"}
+
+    # Preferred shape: {"actions": [...]}. Tolerate {"merge":[...],
+    # "drop":[...]} legacy shape too — see previous version's rationale.
+    # `keep` is now ignored (implicit); we don't need to accept it.
+    if isinstance(parsed.get("actions"), list):
+        return {"actions": parsed["actions"]}
+    canonical: List[Dict] = []
+    for kind in ("drop", "merge"):
+        items = parsed.get(kind)
+        if not isinstance(items, list):
+            continue
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            entry = {**it, "type": kind}
+            canonical.append(entry)
+    if canonical or "actions" in parsed:
+        # Empty actions list is a valid "nothing to change" verdict.
+        return {"actions": canonical}
+    return {"actions": [], "error": "invalid response shape"}
+
+
 def distill_organize_experiences(
     experiences: List[Dict[str, str]],
 ) -> Dict:
@@ -392,58 +805,189 @@ def distill_organize_experiences(
 
     Contract: every input experience id must appear in exactly one action's
     ids / from_ids list — the plan partitions the input. On LLM failure or
-    malformed output, returns {"actions": [], "error": "..."} so the caller
-    can surface a clean error and default to no-op (never destroys data).
+    malformed output for a chunk, the ids in that chunk fall through as
+    implicit keep so no data is ever lost.
+
+    Large corpora are split into `_ORGANIZE_CHUNK_SIZE`-item chunks and
+    processed sequentially; the caller sees one merged plan. Cross-chunk
+    duplicates are NOT caught in a single run (a re-run on the smaller
+    result set will catch them) — the tradeoff for having the whole
+    operation succeed on any corpus size.
 
     `experiences` items are shape {"id": "x_...", "text": "…"}.
     """
     if not experiences:
         return {"actions": []}
-    # A concise numbered list gives the model stable references without
-    # letting the ids leak into the produced text.
-    lines = [f"[{e.get('id')}] {(e.get('text') or '').strip()}" for e in experiences]
-    corpus = "\n".join(lines)
+    input_ids = [str(e["id"]) for e in experiences if e.get("id")]
+    input_id_set = set(input_ids)
+    seen: set = set()
+    merged: List[Dict] = []
+    partial_errors: List[str] = []
+
+    for i in range(0, len(experiences), _ORGANIZE_CHUNK_SIZE):
+        chunk = experiences[i : i + _ORGANIZE_CHUNK_SIZE]
+        chunk_ids = {str(e["id"]) for e in chunk if e.get("id")}
+        result = _distill_organize_one_chunk(chunk)
+        if result.get("error"):
+            # This chunk failed — collect its ids as implicit keeps so
+            # nothing gets lost, and remember the error to surface in UI.
+            partial_errors.append(result["error"])
+            forgotten = [cid for cid in chunk_ids if cid not in seen]
+            if forgotten:
+                merged.append({"type": "keep", "ids": forgotten, "text": ""})
+                for cid in forgotten:
+                    seen.add(cid)
+            continue
+
+        for a in result.get("actions", []):
+            if not isinstance(a, dict):
+                continue
+            t = a.get("type")
+            if t == "keep":
+                # Only accept ids that belong to THIS chunk (LLM may have
+                # hallucinated) and haven't been assigned to a prior action.
+                ids = [i2 for i2 in (a.get("ids") or [])
+                       if isinstance(i2, str) and i2 in chunk_ids and i2 not in seen]
+                for cid in ids:
+                    seen.add(cid)
+                if ids:
+                    merged.append({"type": "keep", "ids": ids, "text": a.get("text") or ""})
+            elif t == "drop":
+                ids = [i2 for i2 in (a.get("ids") or [])
+                       if isinstance(i2, str) and i2 in chunk_ids and i2 not in seen]
+                for cid in ids:
+                    seen.add(cid)
+                if ids:
+                    merged.append({"type": "drop", "ids": ids, "reason": (a.get("reason") or "").strip()})
+            elif t == "merge":
+                from_ids = [i2 for i2 in (a.get("from_ids") or [])
+                            if isinstance(i2, str) and i2 in chunk_ids and i2 not in seen]
+                new_text = (a.get("new_text") or "").strip()
+                if len(from_ids) >= 2 and new_text:
+                    for cid in from_ids:
+                        seen.add(cid)
+                    merged.append({"type": "merge", "from_ids": from_ids, "new_text": new_text[:240]})
+
+    # Any id the LLM forgot across all chunks → implicit keep so we never lose it.
+    forgotten = [i for i in input_id_set if i not in seen]
+    if forgotten:
+        merged.append({"type": "keep", "ids": forgotten, "text": ""})
+
+    out: Dict = {"actions": merged}
+    if partial_errors and not any(a["type"] in ("drop", "merge") for a in merged):
+        # All chunks that reported errors returned nothing actionable —
+        # surface the first error so the user knows nothing will happen.
+        out["error"] = partial_errors[0]
+    elif partial_errors:
+        # Some chunks succeeded, some failed. Report as an informational
+        # note so the user knows a re-run may find more.
+        out["note"] = f"{len(partial_errors)} 个批次 LLM 未返回结果,已跳过并保留原样。稍后可重试。"
+    return out
+
+
+# ── One-click organize for user prompts ──────────────────────────────
+# Same 3-way (merge / drop / implicit-keep) contract as
+# `distill_organize_experiences`, but prompts carry two extra fields
+# that shape merges:
+#
+#   `name`           — optional short slug shown as a chip in the UI
+#   `target_folder`  — the folder the prompt routes into. Two prompts
+#                       with DIFFERENT target_folders solve DIFFERENT
+#                       classification problems, so the LLM must never
+#                       merge across target groups. We enforce this
+#                       both in the prompt instructions AND in the
+#                       downstream apply step (validation).
+
+
+def _distill_organize_prompts_one_chunk(prompts: List[Dict[str, str]]) -> Dict:
+    """Run the organize LLM call on ONE chunk of prompts.
+    Same output contract as _distill_organize_one_chunk (experiences):
+    only merge/drop; unmentioned = implicit keep.
+
+    Extra semantic: merges must NOT cross target_folder boundaries.
+    Rejected merges become no-ops in distill_organize_prompts.
+    """
+    if not prompts:
+        return {"actions": []}
+    lines = []
+    for p in prompts:
+        pid = p.get("id") or ""
+        name = (p.get("name") or "").strip() or "(无名)"
+        tgt = (p.get("target_folder") or "").strip() or "(无目标文件夹)"
+        text = (p.get("text") or "").strip()
+        lines.append(f"[{pid}] name={name} · target={tgt}\n    {text}")
+    corpus = "\n\n".join(lines)
     system_msg = (
-        "你是「经验条目整理助手」。用户维护了一份用于邮件分类的经验列表,"
-        "每一条是一句自然语言指引。你的任务是分析这些条目,识别以下三类问题"
-        "并输出结构化整理方案:\n"
-        "1. 完全重复或语义高度相似 → 合并成一条更精炼的表述(merge)\n"
-        "2. 意思相反 / 存在冲突 → 保留更具体或更近期的一条,或直接删除较弱的(drop)\n"
-        "3. 被另一条完全覆盖(冗余) → 删除较宽泛的(drop)\n"
-        "其他条目一律 keep 原样。要点:\n"
-        "- 每条原始经验必须在输出里恰好出现一次(在 keep.ids / drop.ids / merge.from_ids 之一)\n"
-        "- 保持保守:拿不准就 keep。宁可留冗余,不要误删有用条目\n"
-        "- merge 后的 new_text 用一句中文,≤80 字,聚焦邮件特征"
+        "你是「提示条目整理助手」,任务是**精简**用户为邮件分类维护的提示列表。\n"
+        "核心原则:**宁愿丢失一些提示也要显著减少条目数**。用户明确偏好更精简"
+        "的列表。\n"
+        "执行策略:\n"
+        "1. 只要两条提示的适用场景明显重叠且 **target 完全相同** → 合并成一条更"
+        "通用的表述(merge)\n"
+        "2. 若某条提示被另一条(哪怕更宽泛的、且 target 相同)大致覆盖 → "
+        "直接删除较弱的一条(drop)\n"
+        "3. 意思相反 / 存在冲突且 target 相同 → 只保留更具体或更近期的一条,"
+        "另一条 drop\n"
+        "4. **⚠️ 不同 target 的提示绝对不能合并** —— 它们对应不同的分类目标,"
+        "合并会造成分类错乱\n"
+        "5. 只有当一条提示独一无二、没有任何近似邻居时才让它保留\n"
+        "6. **合并 3~4 条相近提示为 1 条,是非常受欢迎的做法**(前提是 target 一致)\n"
+        "7. 拿不准是否重要 → 倾向 drop(用户已授权你偏激进)"
     )
     user_msg = (
-        "以下是当前所有经验条目,格式为 [id] 文本:\n\n"
+        f"以下是当前提示列表({len(prompts)} 条),格式为 `[id] name=X · target=Y \\n text`:\n\n"
         f"{corpus}\n\n"
-        "请返回严格 JSON,格式为:\n"
-        '{"actions":[{"type":"keep","ids":["x_..."],"text":"..."},'
-        '{"type":"drop","ids":["x_..."],"reason":"..."},'
-        '{"type":"merge","from_ids":["x_...","x_..."],"new_text":"..."}]}\n'
-        "只返回 JSON,不要任何前后缀或 Markdown 代码块。"
+        "请返回严格 JSON,顶级只有一个键 `actions`,值为数组。**只列出要合并或"
+        "删除的动作;未在输出里出现的 id 会自动保留原样,不需要你写 keep**。\n\n"
+        "示例:\n"
+        "```\n"
+        "{\n"
+        '  "actions": [\n'
+        '    {"type":"merge", "from_ids":["p_1","p_2","p_3"],\n'
+        '     "new_name":"合并后的简短名(≤20 字)",\n'
+        '     "new_text":"合并后一句 ≤500 字",\n'
+        '     "target_folder":"必须与被合并的所有 from_ids 一致"},\n'
+        '    {"type":"drop",  "ids":["p_5"], "reason":"被 p_6 覆盖"}\n'
+        "  ]\n"
+        "}\n"
+        "```\n"
+        "❌ 不要输出 keep 动作。\n"
+        "❌ 不要输出 JSON 以外的任何字符或 Markdown 代码块。\n"
+        "❌ merge 至少要合并 2 条(from_ids 长度 ≥ 2);drop 每次可以 1 条起。\n"
+        "❌ merge 的 from_ids 中所有条目必须 target 完全相同,否则你的合并会被"
+        "系统拒绝。\n"
+        "✅ 尽量多合并、多删除。目标是让最终条目数至少减少 30%。"
     )
-    payload = {
-        "messages": [
-            {"role": "system", "content": system_msg},
-            {"role": "user", "content": user_msg},
-        ],
-        "temperature": 0.1,
-        # Cap generous enough for a few dozen items × ~120 chars each.
-        "max_tokens": 4000,
-    }
-    # v4-flash / v4-pro burn a chunk of latency on internal reasoning before
-    # producing output, and this is a batch analysis over the entire corpus
-    # (not one email). The default 15s per-request timeout is way too tight;
-    # a 90s budget matches how long a "review N items and propose a plan"
-    # request actually takes in practice.
+
+    def _run(max_tokens: int, timeout: int) -> str:
+        payload = {
+            "messages": [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ],
+            "temperature": 0.1,
+            "max_tokens": max_tokens,
+        }
+        return chat_completion(payload, timeout=timeout).strip()
+
     try:
-        raw = chat_completion(payload, timeout=90).strip()
+        raw = _run(max_tokens=16000, timeout=180)
+    except ValueError as exc:
+        if "empty content" not in str(exc):
+            logger.warning("organize-prompts chunk failed (%d items): %s",
+                           len(prompts), exc)
+            return {"actions": [], "error": str(exc)}
+        logger.warning("organize-prompts chunk (%d items): empty at 16k, retry at 24k",
+                       len(prompts))
+        try:
+            raw = _run(max_tokens=24000, timeout=300)
+        except Exception as exc2:
+            logger.warning("organize-prompts chunk retry failed: %s", exc2)
+            return {"actions": [], "error": f"LLM 在扩大预算后仍无输出: {exc2}"}
     except Exception as exc:
-        logger.warning("distill_organize_experiences failed: %s", exc)
-        return {"actions": [], "error": f"LLM call failed: {exc}"}
-    # Strip accidental code fences.
+        logger.warning("organize-prompts chunk failed (%d items): %s",
+                       len(prompts), exc)
+        return {"actions": [], "error": str(exc)}
     if raw.startswith("```"):
         lines2 = raw.split("\n")
         if lines2 and lines2[0].startswith("```"):
@@ -454,46 +998,215 @@ def distill_organize_experiences(
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
-        logger.warning("organize plan JSON parse failed: %s | raw=%s", exc, raw[:400])
-        return {"actions": [], "error": "LLM 返回的不是合法 JSON"}
-    if not isinstance(parsed, dict) or not isinstance(parsed.get("actions"), list):
-        return {"actions": [], "error": "LLM 返回的 JSON 缺少 actions 数组"}
-    # Server-side sanity: every input id must appear exactly once across
-    # the plan. If the LLM missed some, silently keep them so no data is
-    # lost. If the LLM invented ids, drop those actions.
-    input_ids = {str(e["id"]) for e in experiences if e.get("id")}
-    seen: set = set()
-    cleaned = []
-    for a in parsed["actions"]:
-        if not isinstance(a, dict):
+        logger.warning("organize-prompts chunk JSON parse failed: %s | raw=%s",
+                       exc, raw[:400])
+        return {"actions": [], "error": "JSON parse failed"}
+    if not isinstance(parsed, dict):
+        return {"actions": [], "error": "invalid response shape"}
+    if isinstance(parsed.get("actions"), list):
+        return {"actions": parsed["actions"]}
+    canonical: List[Dict] = []
+    for kind in ("drop", "merge"):
+        items = parsed.get(kind)
+        if not isinstance(items, list):
             continue
-        t = a.get("type")
-        if t == "keep":
-            ids = [i for i in (a.get("ids") or []) if isinstance(i, str) and i in input_ids and i not in seen]
-            for i in ids:
-                seen.add(i)
-            if ids:
-                cleaned.append({"type": "keep", "ids": ids, "text": a.get("text") or ""})
-        elif t == "drop":
-            ids = [i for i in (a.get("ids") or []) if isinstance(i, str) and i in input_ids and i not in seen]
-            for i in ids:
-                seen.add(i)
-            if ids:
-                cleaned.append({"type": "drop", "ids": ids, "reason": (a.get("reason") or "").strip()})
-        elif t == "merge":
-            from_ids = [i for i in (a.get("from_ids") or []) if isinstance(i, str) and i in input_ids and i not in seen]
-            new_text = (a.get("new_text") or "").strip()
-            if len(from_ids) >= 2 and new_text:
-                for i in from_ids:
-                    seen.add(i)
-                cleaned.append({"type": "merge", "from_ids": from_ids, "new_text": new_text[:240]})
-    # Any id the LLM forgot → implicit keep so we never lose it.
-    forgotten = [i for i in input_ids if i not in seen]
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            entry = {**it, "type": kind}
+            canonical.append(entry)
+    if canonical or "actions" in parsed:
+        return {"actions": canonical}
+    return {"actions": [], "error": "invalid response shape"}
+
+
+def distill_organize_prompts(prompts: List[Dict[str, str]]) -> Dict:
+    """Aggregate + normalise a full-corpus organize plan for prompts.
+    Same contract as `distill_organize_experiences` but each action may
+    carry a `new_name` (short slug) and a `target_folder` (preserved
+    from the group being merged). Cross-target merges are dropped
+    silently — they would be rejected downstream anyway and there's no
+    graceful "half-merge" we can do."""
+    if not prompts:
+        return {"actions": []}
+    input_ids = [str(p["id"]) for p in prompts if p.get("id")]
+    input_id_set = set(input_ids)
+    tgt_by_id = {
+        str(p["id"]): (p.get("target_folder") or "").strip()
+        for p in prompts if p.get("id")
+    }
+    seen: set = set()
+    merged: List[Dict] = []
+    partial_errors: List[str] = []
+    rejected_cross_target = 0
+
+    for i in range(0, len(prompts), _ORGANIZE_CHUNK_SIZE):
+        chunk = prompts[i : i + _ORGANIZE_CHUNK_SIZE]
+        chunk_ids = {str(p["id"]) for p in chunk if p.get("id")}
+        result = _distill_organize_prompts_one_chunk(chunk)
+        if result.get("error"):
+            partial_errors.append(result["error"])
+            forgotten = [cid for cid in chunk_ids if cid not in seen]
+            if forgotten:
+                merged.append({"type": "keep", "ids": forgotten, "text": ""})
+                for cid in forgotten:
+                    seen.add(cid)
+            continue
+
+        for a in result.get("actions", []):
+            if not isinstance(a, dict):
+                continue
+            t = a.get("type")
+            if t == "keep":
+                # Tolerate a stray keep even though we ask not to.
+                ids = [i2 for i2 in (a.get("ids") or [])
+                       if isinstance(i2, str) and i2 in chunk_ids and i2 not in seen]
+                for cid in ids:
+                    seen.add(cid)
+                if ids:
+                    merged.append({"type": "keep", "ids": ids, "text": a.get("text") or ""})
+            elif t == "drop":
+                ids = [i2 for i2 in (a.get("ids") or [])
+                       if isinstance(i2, str) and i2 in chunk_ids and i2 not in seen]
+                for cid in ids:
+                    seen.add(cid)
+                if ids:
+                    merged.append({
+                        "type": "drop",
+                        "ids": ids,
+                        "reason": (a.get("reason") or "").strip(),
+                    })
+            elif t == "merge":
+                from_ids = [i2 for i2 in (a.get("from_ids") or [])
+                            if isinstance(i2, str) and i2 in chunk_ids and i2 not in seen]
+                new_text = (a.get("new_text") or "").strip()
+                new_name = (a.get("new_name") or "").strip()
+                if len(from_ids) < 2 or not new_text:
+                    continue
+                # Enforce single-target: all from_ids must share a target.
+                targets = {tgt_by_id.get(fid, "") for fid in from_ids}
+                if len(targets) > 1:
+                    rejected_cross_target += 1
+                    continue
+                target = next(iter(targets)) if targets else ""
+                for cid in from_ids:
+                    seen.add(cid)
+                merged.append({
+                    "type": "merge",
+                    "from_ids": from_ids,
+                    "new_text": new_text[:2000],
+                    "new_name": new_name[:48],
+                    "target_folder": target,
+                })
+
+    forgotten = [i for i in input_id_set if i not in seen]
     if forgotten:
-        by_id = {str(e["id"]): (e.get("text") or "") for e in experiences}
-        cleaned.append({"type": "keep", "ids": forgotten, "text": ""})
-        # Attach individual texts as note for the modal
-    return {"actions": cleaned}
+        merged.append({"type": "keep", "ids": forgotten, "text": ""})
+
+    out: Dict = {"actions": merged}
+    if partial_errors and not any(a["type"] in ("drop", "merge") for a in merged):
+        out["error"] = partial_errors[0]
+    elif partial_errors:
+        out["note"] = f"{len(partial_errors)} 个批次 LLM 未返回结果,已跳过并保留原样。稍后可重试。"
+    if rejected_cross_target:
+        note_extra = f"{rejected_cross_target} 组跨 target 合并被拒(不同分类目标不能合并)。"
+        out["note"] = (out.get("note") + " " + note_extra) if out.get("note") else note_extra
+    return out
+
+
+# ── AI-powered email search ──────────────────────────────────────────
+# Given a natural-language query, judge whether a single email matches.
+# Wrapped by the search-task machinery in main.py which iterates over
+# the target date-range one email at a time. Returns a dict with a
+# strict boolean `match` and a short reason — never raises.
+
+
+def judge_email_matches_query(
+    *,
+    query: str,
+    from_email: str = "",
+    to_email: str = "",
+    cc_email: str = "",
+    subject: str = "",
+    body: str = "",
+    body_char_cap: int = 1200,
+    owner_email: str = "",
+) -> Dict:
+    """Ask the LLM whether this email matches the user's search intent.
+    Returns {"match": bool, "reason": str}. Best-effort — on any failure
+    returns {"match": False, "reason": "<error>"} so the caller can
+    keep iterating."""
+    body_excerpt = (body or "")[:max(0, body_char_cap)]
+
+    system_msg = (
+        "你是一名邮件语义检索助手。用户给出一段自然语言的检索需求;你需要判断"
+        "一封具体邮件是否满足这个需求。判断标准要**严格**:只有当邮件的主题或"
+        "正文**明确**涉及用户所描述的话题时才判为匹配。"
+        "如果邮件只是与话题擦边、含糊、或只出现零星关键词而没有实际相关内容,"
+        "一律判为不匹配。"
+    )
+    context_lines = []
+    if owner_email:
+        context_lines.append(f"（当前账号邮箱: {owner_email}）")
+    context_lines.append(f"用户检索需求: {query.strip()}")
+    context_lines.append("")
+    context_lines.append("待判断的邮件:")
+    context_lines.append(f"发件人: {from_email or '(unknown)'}")
+    context_lines.append(f"收件人(To): {to_email or '(unknown)'}")
+    context_lines.append(f"抄送(Cc): {cc_email or '(无)'}")
+    context_lines.append(f"主题: {subject or '(empty)'}")
+    context_lines.append(f"正文:\n{body_excerpt or '(无)'}")
+    user_msg = "\n".join(context_lines) + (
+        "\n\n请返回**严格 JSON**,顶级只有两个字段:\n"
+        '{"match": true|false, "reason": "<20 字内中文说明,若匹配请指出邮件里最能支持这一判断的片段>"}\n'
+        "❌ 不要输出 JSON 以外的字符,不要 Markdown 代码块。"
+    )
+
+    def _run(max_tokens: int, timeout: int) -> str:
+        payload = {
+            "messages": [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ],
+            "temperature": 0.0,
+            "max_tokens": max_tokens,
+            "response_format": {"type": "json_object"},
+        }
+        return chat_completion(payload, timeout=timeout).strip()
+
+    try:
+        raw = _run(max_tokens=4000, timeout=60)
+    except ValueError as exc:
+        if "empty content" not in str(exc):
+            return {"match": False, "reason": f"LLM 失败:{exc}"}
+        try:
+            raw = _run(max_tokens=8000, timeout=120)
+        except Exception as exc2:
+            return {"match": False, "reason": f"LLM 失败(扩预算后仍无输出):{exc2}"}
+    except Exception as exc:
+        return {"match": False, "reason": f"LLM 失败:{exc}"}
+    if raw.startswith("```"):
+        lines2 = raw.split("\n")
+        if lines2 and lines2[0].startswith("```"):
+            lines2 = lines2[1:]
+        if lines2 and lines2[-1].strip().startswith("```"):
+            lines2 = lines2[:-1]
+        raw = "\n".join(lines2).strip()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"match": False, "reason": "LLM 返回不是合法 JSON"}
+    if not isinstance(parsed, dict):
+        return {"match": False, "reason": "LLM 返回结构非对象"}
+    match_raw = parsed.get("match")
+    if isinstance(match_raw, bool):
+        matched = match_raw
+    elif isinstance(match_raw, str):
+        matched = match_raw.strip().lower() in {"true", "1", "yes", "y"}
+    else:
+        matched = False
+    reason = (parsed.get("reason") or "").strip()[:200]
+    return {"match": matched, "reason": reason}
 
 
 def generate_reply(

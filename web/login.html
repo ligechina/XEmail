@@ -134,6 +134,25 @@
       }
       .btn-primary:hover { background: var(--primary-hover); }
       .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
+      /* Modal button variants — no block/full-width like .btn-primary */
+      #pw_reset_overlay .btn-primary,
+      #pw_reset_overlay .btn-secondary {
+        display: inline-block;
+        width: auto;
+        min-width: 96px;
+        margin-top: 0;
+      }
+      .btn-secondary {
+        padding: 10px 14px;
+        border-radius: 6px;
+        border: 1px solid #d1d5db;
+        background: #fff;
+        color: #374151;
+        font: inherit;
+        cursor: pointer;
+      }
+      .btn-secondary:hover { background: #f9fafb; }
+      .btn-secondary:disabled { opacity: 0.6; cursor: not-allowed; }
       .status {
         margin-top: 12px;
         min-height: 18px;
@@ -189,6 +208,11 @@
             <input id="login_password" type="password" required />
           </div>
           <button class="btn-primary" type="submit">登录</button>
+          <div style="text-align:right;margin-top:8px;font-size:12px">
+            <a href="#" id="link_forgot" style="color:#2563eb;text-decoration:none">
+              忘记密码?
+            </a>
+          </div>
         </form>
 
         <form id="form_register" autocomplete="off" style="display: none">
@@ -205,6 +229,94 @@
       </div>
 
       <div class="status" id="status"></div>
+    </div>
+
+    <!-- Forgot-password modal. Two-step flow:
+         Step 1: username → server drops a code into <data_dir>/.password_reset_challenge
+                 (0600). Response only names the path, never the code itself.
+         Step 2: user opens the file, reads the 6-digit code, types it back
+                 in with a new password. On success the modal closes and the
+                 user is auto-logged-in (fresh session cookie).
+         Security: local desktop app — only the OS-owner can read files inside
+         the data dir. A remote attacker reaching /api/auth/password-reset/*
+         over LAN can trigger creation but can't read the file to learn the
+         code. -->
+    <div id="pw_reset_overlay"
+         style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.45);
+                z-index:100;align-items:center;justify-content:center;padding:20px">
+      <div style="background:#fff;border-radius:10px;max-width:520px;width:100%;
+                  box-shadow:0 24px 60px rgba(15,23,42,0.25);overflow:hidden">
+        <div style="padding:16px 20px;border-bottom:1px solid #e5e7eb">
+          <h3 style="margin:0;font-size:16px" id="pw_reset_title">找回密码</h3>
+        </div>
+        <div style="padding:16px 20px">
+          <!-- Step 1 -->
+          <div id="pw_reset_step1">
+            <p style="margin:0 0 12px;font-size:13px;color:#374151;line-height:1.55">
+              XEmail 是本地桌面应用。为了确认你本人在操作,系统会把一个 6 位验证码
+              写入本机数据目录中的一个文件,你打开该文件读取验证码即可。
+            </p>
+            <div class="field">
+              <label for="pw_reset_username">用户名</label>
+              <input id="pw_reset_username" style="width:100%;padding:8px;box-sizing:border-box" />
+            </div>
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">
+              <button class="btn-secondary" type="button" id="pw_reset_cancel1">取消</button>
+              <button class="btn-primary" type="button" id="pw_reset_request_btn">发送验证码</button>
+            </div>
+          </div>
+
+          <!-- Step 2 -->
+          <div id="pw_reset_step2" style="display:none">
+            <p style="margin:0 0 8px;font-size:13px;color:#374151;line-height:1.55">
+              验证码已写入以下文件:
+            </p>
+            <div id="pw_reset_path_box"
+                 style="background:#f3f4f6;border:1px solid #e5e7eb;border-radius:6px;
+                        padding:8px 10px;font-family:ui-monospace,monospace;font-size:12px;
+                        word-break:break-all;margin-bottom:8px;display:flex;
+                        justify-content:space-between;align-items:center;gap:8px">
+              <span id="pw_reset_path_txt" style="flex:1;user-select:all"></span>
+              <button type="button" id="pw_reset_copy_btn"
+                      style="flex:none;padding:2px 8px;font-size:11px;
+                             background:#fff;border:1px solid #d1d5db;border-radius:4px;
+                             cursor:pointer">复制路径</button>
+            </div>
+            <p style="margin:0 0 12px;font-size:12px;color:#6b7280;line-height:1.55">
+              请在 Finder / 文件管理器 或终端里打开该文件,读取其中的 <code>code</code> 字段
+              (6 位数字),然后回到这里输入。有效期 5 分钟。
+            </p>
+            <div class="field">
+              <label for="pw_reset_code">验证码</label>
+              <input id="pw_reset_code" inputmode="numeric" pattern="[0-9]{6}"
+                     placeholder="6 位数字"
+                     style="width:100%;padding:8px;box-sizing:border-box;
+                            font-family:ui-monospace,monospace;letter-spacing:2px" />
+            </div>
+            <div class="field">
+              <label for="pw_reset_new_pw">新密码(至少 6 位)</label>
+              <input id="pw_reset_new_pw" type="password" minlength="6"
+                     style="width:100%;padding:8px;box-sizing:border-box" />
+            </div>
+            <div class="field">
+              <label for="pw_reset_new_pw2">再输一次</label>
+              <input id="pw_reset_new_pw2" type="password" minlength="6"
+                     style="width:100%;padding:8px;box-sizing:border-box" />
+            </div>
+            <div id="pw_reset_countdown"
+                 style="font-size:12px;color:#6b7280;margin-top:6px"></div>
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">
+              <button class="btn-secondary" type="button" id="pw_reset_cancel2">取消</button>
+              <button class="btn-primary" type="button" id="pw_reset_complete_btn">
+                重置并登录
+              </button>
+            </div>
+          </div>
+
+          <div id="pw_reset_status"
+               style="margin-top:10px;min-height:16px;font-size:12px"></div>
+        </div>
+      </div>
     </div>
 
     <script>
@@ -370,6 +482,167 @@
         "register",
         t("注册成功，正在进入…")
       );
+
+      // -------- forgot-password modal driver --------
+      // Two-step flow. Step 1 sends username → server writes a code
+      // to <data_dir>/.password_reset_challenge (0600). Step 2 asks
+      // for the code + new password. See backend for security notes.
+      const PwReset = (() => {
+        let countdownTimer = null;
+        let expiresAt = 0;
+
+        function open() {
+          const overlay = $("pw_reset_overlay");
+          overlay.style.display = "flex";
+          $("pw_reset_step1").style.display = "";
+          $("pw_reset_step2").style.display = "none";
+          $("pw_reset_status").textContent = "";
+          $("pw_reset_status").className = "";
+          const preset = ($("login_username").value || "").trim();
+          if (preset) $("pw_reset_username").value = preset;
+          setTimeout(() => $("pw_reset_username").focus(), 30);
+        }
+
+        function close() {
+          const overlay = $("pw_reset_overlay");
+          overlay.style.display = "none";
+          $("pw_reset_status").textContent = "";
+          $("pw_reset_code").value = "";
+          $("pw_reset_new_pw").value = "";
+          $("pw_reset_new_pw2").value = "";
+          if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+        }
+
+        function setPwStatus(msg, level) {
+          const el = $("pw_reset_status");
+          el.textContent = msg || "";
+          el.style.color =
+            level === "error" ? "#b91c1c" :
+            level === "success" ? "#166534" : "#6b7280";
+        }
+
+        function startCountdown(seconds) {
+          expiresAt = Date.now() + seconds * 1000;
+          const cd = $("pw_reset_countdown");
+          function tick() {
+            const remaining = Math.max(0, Math.round((expiresAt - Date.now()) / 1000));
+            const m = Math.floor(remaining / 60);
+            const s = remaining % 60;
+            cd.textContent = remaining > 0
+              ? `⏱ 验证码剩余有效期 ${m}:${String(s).padStart(2, "0")}`
+              : "⏱ 已过期,请重新申请";
+            if (remaining <= 0 && countdownTimer) {
+              clearInterval(countdownTimer);
+              countdownTimer = null;
+            }
+          }
+          tick();
+          if (countdownTimer) clearInterval(countdownTimer);
+          countdownTimer = setInterval(tick, 1000);
+        }
+
+        async function request() {
+          const uname = ($("pw_reset_username").value || "").trim();
+          if (!uname) {
+            setPwStatus("请输入用户名", "error");
+            return;
+          }
+          const btn = $("pw_reset_request_btn");
+          btn.disabled = true;
+          const old = btn.textContent;
+          btn.textContent = "发送中…";
+          setPwStatus("");
+          try {
+            const res = await api("/api/auth/password-reset/request", {
+              method: "POST",
+              body: JSON.stringify({ username: uname }),
+            });
+            $("pw_reset_step1").style.display = "none";
+            $("pw_reset_step2").style.display = "";
+            $("pw_reset_path_txt").textContent = res.challenge_path || "";
+            startCountdown(Number(res.expires_in) || 300);
+            setTimeout(() => $("pw_reset_code").focus(), 30);
+          } catch (err) {
+            setPwStatus(err.message || "请求失败", "error");
+            btn.disabled = false;
+            btn.textContent = old;
+          } finally {
+            if (btn.disabled) {
+              btn.disabled = false;
+              btn.textContent = old;
+            }
+          }
+        }
+
+        async function complete() {
+          const uname = ($("pw_reset_username").value || "").trim();
+          const code = ($("pw_reset_code").value || "").trim();
+          const p1 = $("pw_reset_new_pw").value || "";
+          const p2 = $("pw_reset_new_pw2").value || "";
+          if (!code || code.length !== 6) {
+            setPwStatus("请输入 6 位验证码", "error");
+            return;
+          }
+          if (p1.length < 6) {
+            setPwStatus("新密码至少 6 位", "error");
+            return;
+          }
+          if (p1 !== p2) {
+            setPwStatus("两次输入的新密码不一致", "error");
+            return;
+          }
+          const btn = $("pw_reset_complete_btn");
+          btn.disabled = true;
+          const old = btn.textContent;
+          btn.textContent = "重置中…";
+          setPwStatus("");
+          try {
+            await api("/api/auth/password-reset/complete", {
+              method: "POST",
+              body: JSON.stringify({
+                username: uname,
+                code,
+                new_password: p1,
+              }),
+            });
+            setPwStatus("密码已重置,正在进入…", "success");
+            setTimeout(() => window.location.replace("/"), 400);
+          } catch (err) {
+            setPwStatus(err.message || "重置失败", "error");
+            btn.disabled = false;
+            btn.textContent = old;
+          }
+        }
+
+        async function copyPath() {
+          const path = $("pw_reset_path_txt").textContent || "";
+          try {
+            await navigator.clipboard.writeText(path);
+            setPwStatus("已复制路径到剪贴板", "success");
+          } catch (_) {
+            setPwStatus("无法访问剪贴板,请手动复制上方路径", "error");
+          }
+        }
+
+        return { open, close, request, complete, copyPath };
+      })();
+
+      $("link_forgot").addEventListener("click", (ev) => {
+        ev.preventDefault();
+        PwReset.open();
+      });
+      $("pw_reset_cancel1").addEventListener("click", PwReset.close);
+      $("pw_reset_cancel2").addEventListener("click", PwReset.close);
+      $("pw_reset_request_btn").addEventListener("click", PwReset.request);
+      $("pw_reset_complete_btn").addEventListener("click", PwReset.complete);
+      $("pw_reset_copy_btn").addEventListener("click", PwReset.copyPath);
+      // Enter-to-submit on the modal's active fields.
+      $("pw_reset_username").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); PwReset.request(); }
+      });
+      $("pw_reset_new_pw2").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); PwReset.complete(); }
+      });
 
       installInputFocusRecovery();
       bootstrap();

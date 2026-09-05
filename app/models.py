@@ -8,7 +8,7 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, EmailStr, Field
 
@@ -57,6 +57,12 @@ class SendEmailRequest(BaseModel):
     draft_id: Optional[str] = None
     attach_from_inbox_id: Optional[str] = None
     reply_to_inbox_id: Optional[str] = None
+    # When True, the server explodes To/Cc/Bcc into individual sends —
+    # one message per unique recipient, each seeing only itself in the
+    # To field (Cc/Bcc empty). Cc'd and Bcc'd addresses get their own
+    # copy too (with themselves in To). Useful for group notifications
+    # where recipients shouldn't see who else received the message.
+    send_independently: bool = False
 
 
 class EmailRecord(BaseModel):
@@ -211,6 +217,11 @@ class SentRecord(BaseModel):
     reply_to_inbox_id: Optional[str] = None
     source_message_id: Optional[str] = None
     in_reply_to: Optional[str] = None
+    # "grouped" (default): one wire message with the full recipient list;
+    # "independent": N wire messages, each showing only that recipient
+    # in To. The record itself still lists everyone in to/cc/bcc so the
+    # user can see who they sent to.
+    send_mode: str = "grouped"
 
 
 class SentUpdate(BaseModel):
@@ -336,6 +347,73 @@ class ExperienceOrganizeAction(BaseModel):
 class ExperienceOrganizePlan(BaseModel):
     actions: List[ExperienceOrganizeAction] = Field(default_factory=list)
     error: Optional[str] = None                           # LLM/parse failure surfaced to UI
+    note: Optional[str] = None                            # partial success ("N chunks failed") info
+
+
+class PromptOrganizeAction(BaseModel):
+    """Mirrors ExperienceOrganizeAction but with the extra fields that
+    prompts carry: `new_name` (short slug) and `target_folder` (which
+    folder the merged prompt routes into — must match all from_ids)."""
+    type: str  # "keep" | "drop" | "merge"
+    ids: List[str] = Field(default_factory=list)          # keep / drop
+    from_ids: List[str] = Field(default_factory=list)     # merge
+    text: str = ""                                         # keep (echo)
+    reason: str = ""                                       # drop
+    new_text: str = ""                                     # merge
+    new_name: str = ""                                     # merge
+    target_folder: str = ""                                # merge — inherited from group
+
+
+class PromptOrganizePlan(BaseModel):
+    actions: List[PromptOrganizeAction] = Field(default_factory=list)
+    error: Optional[str] = None
+    note: Optional[str] = None
+
+
+class RecategorizeSuggestRequest(BaseModel):
+    """After the frontend moves an email to a new category (either via
+    right-click or drag-and-drop), it asks the backend to propose a
+    classification experience derived from that move. `from_category` is
+    the pre-move category so the LLM can reason about the delta."""
+    from_category: str = ""
+    to_category: str
+
+
+class RecategorizeSuggestion(BaseModel):
+    """LLM output shape: a one-sentence generalisable experience, plus a
+    hint of whether it duplicates an existing entry.
+
+    `duplicate_of` is null when the LLM judged the candidate to add
+    genuinely new coverage; when non-null it references the existing
+    experience id that already captures this case, so the frontend can
+    offer 「复用」 as the primary action instead of 「新增」."""
+    candidate_text: str = ""
+    duplicate_of: Optional[str] = None
+    similar_text: Optional[str] = None    # server denorms the dup's text for the UI
+    reason: str = ""
+    error: Optional[str] = None
+
+
+class RecategorizeConfirmRequest(BaseModel):
+    """Frontend closes the suggestion modal with one of three actions:
+
+    - action=add    → save `text` as a new experience
+    - action=reuse  → skip creation; existing `reuse_id` already covers this
+    - action=skip   → user explicitly declined to record any experience
+
+    `text` is only read on action=add. `reuse_id` is only read on
+    action=reuse and must be an experience owned by the active account."""
+    action: str  # "add" | "reuse" | "skip"
+    text: str = ""
+    reuse_id: Optional[str] = None
+
+
+class ImportanceSuggestRequest(BaseModel):
+    """Mirrors RecategorizeSuggestRequest for the ⭐ mark/unmark flow.
+    `direction` tells the backend which kind of experience to generate
+    (marking-as-important vs. unmarking) — the flip itself is already
+    done by the frontend via /update before this call fires."""
+    direction: str  # "mark" | "unmark"
 
 
 class ComposeDraftRequest(BaseModel):
@@ -456,10 +534,16 @@ class LlmConfigUpdate(BaseModel):
 
 class LlmFieldConfig(BaseModel):
     """Per-account toggle of which raw email fields to include in the
-    user-message payload sent to Qwen during classification."""
+    user-message payload sent to the classifier LLM.
+
+    To and Cc default to True: rules like「只是抄送给我的邮件不要标为
+    重要」only work if the LLM can see who's in the To vs Cc lists.
+    Turning them off is possible for privacy-conscious deployments but
+    breaks any prompt/experience/rule that reasons about recipient roles."""
 
     include_from: bool = True
-    include_to: bool = False
+    include_to: bool = True
+    include_cc: bool = True
     include_subject: bool = True
     include_body: bool = True
     include_attachments: bool = False
@@ -487,12 +571,18 @@ class FixedRule(BaseModel):
     program: Dict = Field(default_factory=dict)
     code_preview: str = ""
     refs: List[str] = Field(default_factory=list)  # denormalized @name dependencies
-    target_folder: str
-    # When True, an email matching this rule is ALSO flagged as important.
-    # Fixed rules short-circuit LLM classification, so without this the
-    # important flag would never get set on rule-hits. Default False keeps
-    # legacy rules behaving exactly as before.
+    # A rule can affect two things independently:
+    #   1. `target_folder` — where to route the email. Empty means "do NOT
+    #      short-circuit the classifier; keep whatever category the LLM
+    #      picks for this email". A rule with no folder + no importance
+    #      action is a no-op and is rejected on save.
+    #   2. `mark_important` / `unmark_important` — override the LLM's
+    #      importance verdict. Mutually exclusive; both false = don't touch.
+    #      An importance-only rule (no target_folder) still runs the LLM for
+    #      the category, then post-hoc overrides the importance flag.
+    target_folder: str = ""
     mark_important: bool = False
+    unmark_important: bool = False
     created_at: str
     updated_at: Optional[str] = None
 
@@ -504,22 +594,25 @@ class FixedRuleCompileRequest(BaseModel):
     rule that's about to be created/updated."""
 
     nl_text: str = Field(..., min_length=1, max_length=2000)
-    target_folder: str = Field(..., min_length=1, max_length=128)
+    # Empty = importance-only rule (doesn't override the LLM's category).
+    target_folder: str = Field(default="", max_length=128)
     name: str = Field(default="", max_length=48)
     editing_id: Optional[str] = None
-    mark_important: bool = False  # forwarded to preview so the confirm step keeps it
+    mark_important: bool = False
+    unmark_important: bool = False
 
 
 class FixedRuleCompileResponse(BaseModel):
     nl_text: str
-    target_folder: str
+    target_folder: str = ""
     explanation: str
     code_preview: str
     program: Dict
     name: str = ""
-    expanded_nl: str = ""           # NL after @ref substitution, for transparency
+    expanded_nl: str = ""
     refs: List[str] = Field(default_factory=list)
-    mark_important: bool = False    # echoed back so the confirm step can display it
+    mark_important: bool = False
+    unmark_important: bool = False
 
 
 class FixedRuleValidateRequest(BaseModel):
@@ -546,8 +639,10 @@ class FixedRuleCreate(BaseModel):
     code_preview: str = Field(default="", max_length=4000)
     program: Dict
     refs: List[str] = Field(default_factory=list)
-    target_folder: str = Field(..., min_length=1, max_length=128)
+    # Empty target_folder = importance-only rule (see FixedRule docstring).
+    target_folder: str = Field(default="", max_length=128)
     mark_important: bool = False
+    unmark_important: bool = False
 
 
 class FixedRuleUpdate(BaseModel):
@@ -557,8 +652,10 @@ class FixedRuleUpdate(BaseModel):
     code_preview: Optional[str] = Field(default=None, max_length=4000)
     program: Optional[Dict] = None
     refs: Optional[List[str]] = None
-    target_folder: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    # Explicitly allow empty string to switch a rule to importance-only.
+    target_folder: Optional[str] = Field(default=None, max_length=128)
     mark_important: Optional[bool] = None
+    unmark_important: Optional[bool] = None
 
 
 class FixedRuleReorder(BaseModel):
@@ -609,3 +706,29 @@ class ContactUpdate(BaseModel):
     email: Optional[EmailStr] = None
     tags: Optional[List[str]] = None
     note: Optional[str] = Field(default=None, max_length=2000)
+
+
+# -------- background tasks (receive / classify / reclassify) --------
+
+class TaskInfo(BaseModel):
+    """Snapshot of a long-running task; polled by the UI to drive the
+    progress modal + pause/cancel buttons."""
+
+    id: str
+    kind: str  # "receive" | "classify_unsorted" | "reclassify_all"
+    label: str
+    status: str  # "running" | "paused" | "done" | "error" | "cancelled"
+    progress: Dict[str, Any] = Field(default_factory=dict)
+    result: Dict[str, Any] = Field(default_factory=dict)
+    error: str = ""
+    started_at: float = 0.0
+    updated_at: float = 0.0
+    finished_at: Optional[float] = None
+
+
+class ActiveTaskResponse(BaseModel):
+    task: Optional[TaskInfo] = None
+
+
+class ReceiveTaskStartRequest(BaseModel):
+    days: Optional[int] = Field(default=None, ge=1, le=100)

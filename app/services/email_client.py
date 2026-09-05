@@ -70,6 +70,7 @@ def classify_email_record(
     system_prompt: Optional[str] = None,
     user_prompts_with_targets: Optional[List[Dict]] = None,
     field_config: Optional[Dict] = None,
+    owner_email: str = "",
 ) -> Tuple[str, bool, str, Dict]:
     """Per-email classification pipeline. Returns (category, important, reason, trace).
 
@@ -90,13 +91,25 @@ def classify_email_record(
 
     _ts = _t.strftime("%Y-%m-%dT%H:%M:%S", _t.gmtime()) + "Z"
 
-    # 1) Programmatic fixed rules. Rules with target "*" ("全部") are not
-    # routing rules — they match across all folders so they can't pick a
-    # destination. We let those fall through to the LLM step instead of
-    # returning early; the rule's NL text is forwarded to the LLM as general
-    # guidance (see _classification_context in main.py).
+    # 1) Programmatic fixed rules. Two flavours:
+    #
+    #    a) Routing rule (target_folder is set + not "*") — SHORT-CIRCUITS.
+    #       The rule owns both the category and the importance flag; the
+    #       LLM isn't consulted.
+    #    b) Importance-only rule (target_folder empty; mark_important or
+    #       unmark_important true) — does NOT short-circuit. The LLM still
+    #       decides the category; then the first matching importance rule
+    #       overrides the LLM's importance verdict. This lets the user say
+    #       "when only I'm in cc, never mark as important" without also
+    #       forcing that email into some folder.
+    #
+    # Rules with target "*" ("全部") are neither routing nor importance
+    # rules — they're general LLM guidance whose NL text is forwarded via
+    # _classification_context in main.py; skip them here.
+    importance_override: Optional[bool] = None
+    importance_override_source: Optional[Dict] = None
     for rule in fixed_rules or []:
-        if _match_fixed_rule(
+        if not _match_fixed_rule(
             rule,
             from_email=from_email,
             to_email=to_email,
@@ -104,31 +117,45 @@ def classify_email_record(
             subject=subject,
             body=body,
         ):
-            target = (rule.get("target_folder") or "").strip()
-            if target and target != "*":
-                nl_excerpt = (rule.get("nl_text") or "").strip().replace("\n", " ")
-                if len(nl_excerpt) > 40:
-                    nl_excerpt = nl_excerpt[:40] + "…"
-                # Honor the rule's `mark_important` flag. Historically rule-
-                # hits could never set important because they short-circuit
-                # the LLM (which is the only other producer of that flag);
-                # this checkbox lets a rule express "route AND flag" in one
-                # place, avoiding the workaround of writing a prompt/experience
-                # for the same sender.
-                mark_important = bool(rule.get("mark_important"))
-                trace = {
-                    "ts": _ts,
-                    "stage": "fixed_rule",
-                    "matched_rule_id": rule.get("id") or "",
-                    "matched_rule_name": rule.get("name") or "",
-                    "matched_rule_nl": (rule.get("nl_text") or "").strip(),
-                    "matched_rule_target": target,
-                    "matched_rule_mark_important": mark_important,
-                    "final_category": target,
-                    "final_important": mark_important,
-                    "reason": f"固定规则命中: {nl_excerpt or rule.get('id')}",
-                }
-                return target, mark_important, trace["reason"], trace
+            continue
+        target = (rule.get("target_folder") or "").strip()
+        mark_important = bool(rule.get("mark_important"))
+        unmark_important = bool(rule.get("unmark_important"))
+        if target and target != "*":
+            nl_excerpt = (rule.get("nl_text") or "").strip().replace("\n", " ")
+            if len(nl_excerpt) > 40:
+                nl_excerpt = nl_excerpt[:40] + "…"
+            # Routing rule: category comes from the rule; importance is
+            # `mark_important` if set, `False` if `unmark_important`, else
+            # `False` (the default when the rule doesn't say anything).
+            if unmark_important and not mark_important:
+                imp_out = False
+            else:
+                imp_out = mark_important
+            trace = {
+                "ts": _ts,
+                "stage": "fixed_rule",
+                "matched_rule_id": rule.get("id") or "",
+                "matched_rule_name": rule.get("name") or "",
+                "matched_rule_nl": (rule.get("nl_text") or "").strip(),
+                "matched_rule_target": target,
+                "matched_rule_mark_important": mark_important,
+                "matched_rule_unmark_important": unmark_important,
+                "final_category": target,
+                "final_important": imp_out,
+                "reason": f"固定规则命中: {nl_excerpt or rule.get('id')}",
+            }
+            return target, imp_out, trace["reason"], trace
+        # Importance-only path: capture the FIRST matching directive; the
+        # rest are ignored (mirrors "first match wins" of routing rules).
+        if importance_override is None and (mark_important or unmark_important):
+            importance_override = True if mark_important else False
+            importance_override_source = {
+                "id": rule.get("id") or "",
+                "name": rule.get("name") or "",
+                "nl_text": (rule.get("nl_text") or "").strip(),
+                "direction": "mark" if mark_important else "unmark",
+            }
 
     # 2) LLM
     cat, important, reason = classify_via_llm(
@@ -136,6 +163,8 @@ def classify_email_record(
         subject,
         body,
         to_email=to_email,
+        cc_email=cc_email,
+        owner_email=owner_email,
         attachments=attachments,
         system_prompt=system_prompt,
         user_prompts_with_targets=user_prompts_with_targets,
@@ -164,7 +193,20 @@ def classify_email_record(
     llm_produced = bool(cat)
     used_cat = cat if (cat and (not available_folders or cat in available_folders)) else ""
     final_cat = used_cat or UNCLASSIFIED
+    # Importance: LLM's verdict, unless an importance-only fixed rule
+    # matched above — that user-authored override wins (the point of the
+    # rule was precisely to overrule the LLM here).
+    if importance_override is not None:
+        final_important = importance_override
+    else:
+        final_important = bool(important)
     final_reason = reason if used_cat else (reason or "未命中固定规则且 LLM 无有效分类")
+    if importance_override is not None and importance_override_source:
+        dir_label = "标为重要" if importance_override else "取消重要"
+        rule_ident = importance_override_source.get("name") or importance_override_source.get("id") or "?"
+        override_note = f"（重要标签被固定规则「{rule_ident}」{dir_label}）"
+        # Extend the human reason so classification history is legible.
+        final_reason = (final_reason + override_note) if final_reason else override_note
     trace = {
         "ts": _ts,
         "stage": "llm" if llm_produced else "fallback",
@@ -176,16 +218,18 @@ def classify_email_record(
         "llm_raw_category": cat,        # what the LLM literally output
         "llm_reason": reason,
         "llm_important": bool(important),
+        "importance_override": importance_override,
+        "importance_override_source": importance_override_source,
         "final_category": final_cat,
-        "final_important": bool(important),
+        "final_important": final_important,
         "reason": final_reason,
     }
     if used_cat:
-        return used_cat, important, reason, trace
+        return used_cat, final_important, final_reason, trace
     # 3) Tombstone: LLM didn't produce a usable category → 未分类. Preserve
-    # important=True if the LLM asserted it (user told us to flag regardless
-    # of which folder it ends up in).
-    return UNCLASSIFIED, important, final_reason, trace
+    # the (possibly-overridden) importance verdict — user's importance-only
+    # rule should still bind even when the classifier failed to route.
+    return UNCLASSIFIED, final_important, final_reason, trace
 
 
 def _split_address_header(raw: str) -> List[str]:
@@ -310,11 +354,13 @@ def receive_emails(
     fixed_rules: Optional[List[Dict]] = None,
     available_folders: Optional[List[str]] = None,
     field_config: Optional[Dict] = None,
+    owner_email: str = "",
     on_progress=None,
     sync_state: Optional[Dict[str, Dict[str, str]]] = None,
     on_batch_ready: Optional[Any] = None,
     batch_size: int = 10,
     known_uids: Optional[set] = None,
+    on_yield=None,
 ) -> Tuple[List[Dict], Dict[str, str]]:
     """Fetch emails received in the last `days` days, deduplicated against
     what we already have. Returns `(records, sync_meta)` where `sync_meta`
@@ -540,6 +586,13 @@ def receive_emails(
                 batch_pending.clear()
 
         for idx, uid_bytes in enumerate(uids):
+            # Cooperative pause / cancel point. `on_yield` (if supplied by
+            # the task runner) may block until the user resumes, or raise
+            # TaskCancelled to abort the fetch cleanly. Raised exceptions
+            # exit the loop entirely — do NOT wrap in the per-email try
+            # below, whose `except Exception` would swallow TaskCancelled.
+            if on_yield:
+                on_yield()
             uid_str = uid_bytes.decode("ascii", errors="replace") if uid_bytes else ""
             # A single malformed email or transient classifier hiccup must not
             # nuke a 100+ email batch (each iteration may include an LLM call,
@@ -630,6 +683,7 @@ def receive_emails(
                     system_prompt=system_prompt,
                     user_prompts_with_targets=user_prompts_with_targets,
                     field_config=field_config,
+                    owner_email=owner_email,
                 )
 
                 new_record = {
