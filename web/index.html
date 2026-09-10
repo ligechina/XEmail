@@ -1456,6 +1456,23 @@
         background: #b91c1c;
         color: #fff;
       }
+      /* Handled-important variant on the folder row: mirrors the outline
+         style of .important-badge.handled used on the email row itself,
+         so users see the same "still important but already ack'd"
+         semantic in the sidebar. Rendered next to the solid-red pending
+         badge when a folder has both kinds; on its own when a folder has
+         only handled-importants. */
+      .folder .count.count-important-handled {
+        color: #dc2626;
+        background: transparent;
+        border: 1px solid rgba(220, 38, 38, 0.45);
+        font-weight: 600;
+        margin-right: 4px;
+      }
+      .folder.active .count.count-important-handled {
+        color: #b91c1c;
+        border-color: rgba(185, 28, 28, 0.55);
+      }
       /* Email list */
       .maillist {
         background: var(--surface);
@@ -7320,20 +7337,19 @@
           __trash__: sentTrashed,
         };
         const unread = { __all__: 0 };
-        // Per-folder count of important-pending emails — rolls up the path
-        // hierarchy the same way `unread` does, so a parent folder shows
-        // the sum of important-pending mail in itself + descendants.
+        // Per-folder rollups for the two important flavours. Both roll up
+        // the path hierarchy the same way `unread` does, so a parent
+        // folder shows the sum in itself + descendants.
+        //   important        = ⭐ AND !handled ("待处理"，红实心)
+        //   importantHandled = ⭐ AND  handled ("已处理"，红空心)
         const important = { __all__: 0 };
+        const importantHandled = { __all__: 0 };
         for (const item of allEmails) {
           if (item.deleted) {
             total.__trash__++;
             continue;
           }
           total.__all__++;
-          // 重要 list now strictly means "still pending":  important AND
-          // not yet handled. Once the user clicks 已处理 the email moves
-          // to 曾经重要 (important AND handled). The two folders partition
-          // every important record.
           const pending = item.important && !item.handled;
           const formerly = item.important && item.handled;
           if (pending) {
@@ -7345,6 +7361,9 @@
           }
           if (formerly) {
             total.__formerly_important__++;
+            importantHandled.__all__++;
+            importantHandled.__formerly_important__ =
+              (importantHandled.__formerly_important__ || 0) + 1;
           }
           if (!item.read) unread.__all__++;
           // Aggregate counts up the path hierarchy (parents include descendants).
@@ -7356,30 +7375,45 @@
             total[acc] = (total[acc] || 0) + 1;
             if (!item.read) unread[acc] = (unread[acc] || 0) + 1;
             if (pending) important[acc] = (important[acc] || 0) + 1;
+            if (formerly) importantHandled[acc] = (importantHandled[acc] || 0) + 1;
           }
         }
-        return { total, unread, important };
+        return { total, unread, important, importantHandled };
       }
 
-      function badgeFor(key, total, unread, important, isLocal) {
+      function badgeFor(key, total, unread, important, importantHandled, isLocal) {
         // Locals here are intentionally not named `t` — that would shadow
         // the global translation function we call below for the tooltip.
         const u = unread[key] || 0;
         const tot = total[key] || 0;
-        const im = important[key] || 0;
-        // Show the red 重要-pending badge on real category folders only. Hide
-        // it on 全部 (catch-all parent, would just duplicate every child's
-        // count) and on 重要 itself (the row IS that list — use the red
-        // badge style on its total instead, handled below).
-        const importantBadge =
-          im > 0 && key !== "__all__" && key !== "__important__"
-            ? `<span class="count count-important" title="${t("重要待处理")}">${im}</span>`
-            : "";
+        const imP = important[key] || 0;
+        const imH = importantHandled[key] || 0;
+        // Show 重要 badges on real category folders + the built-in
+        // inbox labels 未分类 / 垃圾邮件 that pass through here. Hide
+        // on 全部 (would duplicate every child's count), on 重要 itself
+        // (the row IS that list; badge handled specially below), and
+        // on 曾经重要 (same story).
+        const hideImportantOn = new Set(["__all__", "__important__", "__formerly_important__"]);
+        let importantBadge = "";
+        if (!hideImportantOn.has(key)) {
+          if (imP > 0) {
+            importantBadge += `<span class="count count-important" title="${t("重要 · 待处理")}">${imP}</span>`;
+          }
+          if (imH > 0) {
+            importantBadge += `<span class="count count-important-handled" title="${t("重要 · 已处理")}">${imH}</span>`;
+          }
+        }
         if (key === "__important__") {
-          // 重要 folder shows its pending count in the red 重要 style so it
-          // visually matches the badges on the other folders.
-          return im > 0
-            ? `<span class="count count-important" title="${t("重要待处理")}">${im}</span>`
+          return imP > 0
+            ? `<span class="count count-important" title="${t("重要待处理")}">${imP}</span>`
+            : (tot > 0 ? `<span class="count">${tot}</span>` : "");
+        }
+        if (key === "__formerly_important__") {
+          // 曾经重要 row: outline-style badge to match the pattern used
+          // on real folders that have handled-important mail. Falls back
+          // to plain total when it's empty.
+          return imH > 0
+            ? `<span class="count count-important-handled" title="${t("重要 · 已处理")}">${imH}</span>`
             : (tot > 0 ? `<span class="count">${tot}</span>` : "");
         }
         if (isLocal)
@@ -7391,10 +7425,10 @@
         return importantBadge;
       }
 
-      function renderFolderRow(opts, total, unread, important) {
+      function renderFolderRow(opts, total, unread, important, importantHandled) {
         const indent = 10 + opts.depth * 14;
         const active = opts.key === currentFolder ? "active" : "";
-        const badge = badgeFor(opts.key, total, unread, important, opts.local);
+        const badge = badgeFor(opts.key, total, unread, important, importantHandled, opts.local);
         const nameClass = opts.alertName ? "name unclassified-alert" : "name";
         // Real category folders are draggable for reorder; virtual rows
         // (全部 / 重要 / 已发送 / 草稿箱 / 回收站) and lone children (canMove=false)
@@ -7414,7 +7448,7 @@
       }
 
       function renderFolders() {
-        const { total, unread, important } = computeCounts();
+        const { total, unread, important, importantHandled } = computeCounts();
         const unclassifiedCount = total[UNCLASSIFIED_FOLDER] || 0;
         const tree = buildFolderTree(folders);
         const flat = flattenFolderTree(tree);
@@ -7425,9 +7459,6 @@
             <span>收件</span>
             <button class="section-add" title="新建文件夹" onclick="createTopFolder()">+</button>
           </h4>`;
-        // 重要 + 曾经重要 pinned at the top — most-used filter, first slot.
-        // local:true keeps the badge shape identical to its old position in
-        // the 本地 section (plain total count, never the unread-style blue).
         html += renderFolderRow(
           {
             key: IMPORTANT_FOLDER.key,
@@ -7436,12 +7467,8 @@
             depth: 0,
             local: true,
           },
-          total,
-          unread,
-          important
+          total, unread, important, importantHandled,
         );
-        // 曾经重要 sits directly below — same row shape, no pending badge
-        // (these have already been acknowledged), just a plain total.
         html += renderFolderRow(
           {
             key: FORMERLY_IMPORTANT_FOLDER.key,
@@ -7450,15 +7477,11 @@
             depth: 0,
             local: true,
           },
-          total,
-          unread,
-          important
+          total, unread, important, importantHandled,
         );
         html += renderFolderRow(
           { key: "__all__", name: "全部", icon: "✦", depth: 0 },
-          total,
-          unread,
-          important
+          total, unread, important, importantHandled,
         );
 
         for (const node of flat) {
@@ -7477,9 +7500,7 @@
               canDelete: !isDefaultFolder(node.path),
               canMove: pos.total > 1,
             },
-            total,
-            unread,
-            important
+            total, unread, important, importantHandled,
           );
         }
 
@@ -7487,9 +7508,7 @@
         for (const f of LOCAL_FOLDERS) {
           html += renderFolderRow(
             { key: f.key, name: f.name, icon: f.icon, depth: 0, local: true },
-            total,
-            unread,
-            important
+            total, unread, important, importantHandled,
           );
         }
 
@@ -8491,6 +8510,17 @@
             __sourceSubject: sourceSubject,
             __latestTime: latestTime,
             important: items.some((x) => !!x.important),
+            // Handled rollup:  ONLY true when every important member is
+            // also handled. Otherwise there's at least one pending-
+            // important member and the row must display as solid "重要"
+            // (pending) — which requires handled=false so the row-level
+            // .important-badge picks the solid style. Without this
+            // rollup, a merged row inheriting `rowRep.handled` from a
+            // non-important representative would show pending styling
+            // for a thread that's actually all-handled — and vice
+            // versa — which is exactly the "看到红重要标签但左侧文件夹
+            // 没有待处理计数" mismatch users hit.
+            handled: items.every((x) => !x.important || !!x.handled),
             pinned: items.some((x) => !!x.pinned),
             // Sent records don't have a read flag — treat as inherently
             // read so an unanswered + read inbox bucket doesn't get

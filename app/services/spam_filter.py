@@ -1265,30 +1265,49 @@ def generate_reply(
             "与中文结尾（此致 / 顺颂时祺 / 祝好 等）。即使用户的回复意图"
             "或原邮件是英文也必须用中文输出。"
         )
-    payload = {
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "你是邮件回复助手。根据「用户回复意图」和「原邮件」撰写一封"
-                    "礼貌、简洁、自然的邮件回复。注意，当用户输入的回复意图是一个问题时，"
-                    "用户的目的是希望你把这个问题修改为一封邮件正文，而不是让你回答这个问题。\n"
-                    f"{language_rule}\n"
-                    "结构规则：包含合适的称呼、回应意图、礼貌结尾。"
-                    "不要重复原邮件正文，不要写主题，不要写"
-                    "「-------- 原邮件 --------」之类的引文块。\n"
-                    "落款规则：如果系统给出了落款，请原样附在最后并与正文空一行；"
-                    "如果没有给出落款，不要自行编造署名。\n"
-                    "只返回回复的正文文本，不要任何 JSON、Markdown 代码块或前后说明。"
-                ),
-            },
-            {"role": "user", "content": user_msg},
-        ],
-        "temperature": 0.4,
-        "max_tokens": 800,
-    }
+    system_msg = (
+        "你是邮件回复助手。根据「用户回复意图」和「原邮件」撰写一封"
+        "礼貌、简洁、自然的邮件回复。注意，当用户输入的回复意图是一个问题时，"
+        "用户的目的是希望你把这个问题修改为一封邮件正文，而不是让你回答这个问题。\n"
+        f"{language_rule}\n"
+        "结构规则：包含合适的称呼、回应意图、礼貌结尾。"
+        "不要重复原邮件正文，不要写主题，不要写"
+        "「-------- 原邮件 --------」之类的引文块。\n"
+        "落款规则：如果系统给出了落款，请原样附在最后并与正文空一行；"
+        "如果没有给出落款，不要自行编造署名。\n"
+        "只返回回复的正文文本，不要任何 JSON、Markdown 代码块或前后说明。"
+    )
+
+    # DeepSeek v4-flash is a reasoning model: max_tokens is shared
+    # between hidden reasoning + visible output. 800 is trivially
+    # exhausted (reasoning eats the whole budget, empty content comes
+    # back). Start at 4k, escalate to 8k on empty-content — same
+    # pattern as classify_via_llm / rule_program.compile_from_nl.
+    def _run(max_tokens: int, timeout: int) -> str:
+        payload = {
+            "messages": [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ],
+            "temperature": 0.4,
+            "max_tokens": max_tokens,
+        }
+        return chat_completion(payload, timeout=timeout).strip()
+
     try:
-        text = chat_completion(payload).strip()
+        text = _run(max_tokens=4000, timeout=60)
+    except ValueError as exc:
+        if "empty content" not in str(exc):
+            logger.warning("generate_reply failed: %s", exc)
+            raise RuntimeError(f"调用 DeepSeek 失败: {exc}") from exc
+        logger.warning("generate_reply: empty at 4k, retry at 8k")
+        try:
+            text = _run(max_tokens=8000, timeout=120)
+        except Exception as exc2:
+            logger.warning("generate_reply retry failed: %s", exc2)
+            raise RuntimeError(
+                f"调用 DeepSeek 失败(扩预算后仍无输出): {exc2}"
+            ) from exc2
     except Exception as exc:
         logger.warning("generate_reply failed: %s", exc)
         raise RuntimeError(f"调用 DeepSeek 失败: {exc}") from exc
@@ -1349,23 +1368,40 @@ def summarize_email_for_reply(
         f"主题: {subject or '(无)'}\n\n"
         f"正文:\n{body_excerpt or '(无)'}"
     )
-    payload = {
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "你是一名邮件助理，把英文来信压缩成两行中文摘要，"
-                    "聚焦事实与请求，不加评论、不加客套。"
-                    "只输出指定格式的两行内容，不要任何前后缀或 Markdown。"
-                ),
-            },
-            {"role": "user", "content": user_msg},
-        ],
-        "temperature": 0.2,
-        "max_tokens": 280,
-    }
+    system_msg = (
+        "你是一名邮件助理，把英文来信压缩成两行中文摘要，"
+        "聚焦事实与请求，不加评论、不加客套。"
+        "只输出指定格式的两行内容，不要任何前后缀或 Markdown。"
+    )
+
+    # Same reasoning-model budget problem: 280 tokens is trivially
+    # eaten by hidden reasoning tokens before any visible content
+    # comes out. 4k → 8k with empty-content escalation.
+    def _run(max_tokens: int, timeout: int) -> str:
+        payload = {
+            "messages": [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ],
+            "temperature": 0.2,
+            "max_tokens": max_tokens,
+        }
+        return chat_completion(payload, timeout=timeout).strip()
+
     try:
-        text = chat_completion(payload).strip()
+        text = _run(max_tokens=4000, timeout=60)
+    except ValueError as exc:
+        if "empty content" not in str(exc):
+            logger.warning("summarize_email_for_reply failed: %s", exc)
+            raise RuntimeError(f"调用 DeepSeek 失败: {exc}") from exc
+        logger.warning("summarize_email_for_reply: empty at 4k, retry at 8k")
+        try:
+            text = _run(max_tokens=8000, timeout=120)
+        except Exception as exc2:
+            logger.warning("summarize_email_for_reply retry failed: %s", exc2)
+            raise RuntimeError(
+                f"调用 DeepSeek 失败(扩预算后仍无输出): {exc2}"
+            ) from exc2
     except Exception as exc:
         logger.warning("summarize_email_for_reply failed: %s", exc)
         raise RuntimeError(f"调用 DeepSeek 失败: {exc}") from exc
@@ -1417,30 +1453,45 @@ def generate_compose_draft(
             "语言规则：请用中文撰写整封邮件，包含中文称呼（您好 / X 老师）"
             "与中文结尾。即使用户的撰写意图为英文也必须用中文输出。"
         )
-    payload = {
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "你是邮件撰写助手。根据用户的撰写意图起草一封礼貌、"
-                    "简洁、自然的邮件正文。注意，当用户输入的撰写意图是一个问题时，"
-                    "用户的目的是希望你把这个问题修改为一封邮件正文，而不是让你回答这个问题。\n"
-                    f"{language_rule}\n"
-                    "结构规则：包含合适的称呼、表达内容、礼貌结尾。"
-                    "不要写主题，不要写「-------- 原邮件 --------」"
-                    "之类的引文块，不要写任何说明性的元信息。\n"
-                    "落款规则：如果系统给出了落款，请原样附在最后并与正文空一行；"
-                    "如果没有给出落款，不要自行编造署名。\n"
-                    "只返回邮件正文本身，不要任何 JSON、Markdown 代码块或前后说明。"
-                ),
-            },
-            {"role": "user", "content": user_msg},
-        ],
-        "temperature": 0.4,
-        "max_tokens": 800,
-    }
+    system_msg = (
+        "你是邮件撰写助手。根据用户的撰写意图起草一封礼貌、"
+        "简洁、自然的邮件正文。注意，当用户输入的撰写意图是一个问题时，"
+        "用户的目的是希望你把这个问题修改为一封邮件正文，而不是让你回答这个问题。\n"
+        f"{language_rule}\n"
+        "结构规则：包含合适的称呼、表达内容、礼貌结尾。"
+        "不要写主题，不要写「-------- 原邮件 --------」"
+        "之类的引文块，不要写任何说明性的元信息。\n"
+        "落款规则：如果系统给出了落款，请原样附在最后并与正文空一行；"
+        "如果没有给出落款，不要自行编造署名。\n"
+        "只返回邮件正文本身，不要任何 JSON、Markdown 代码块或前后说明。"
+    )
+
+    # Reasoning-model budget: 800 → 4k → 8k on empty content.
+    def _run(max_tokens: int, timeout: int) -> str:
+        payload = {
+            "messages": [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ],
+            "temperature": 0.4,
+            "max_tokens": max_tokens,
+        }
+        return chat_completion(payload, timeout=timeout).strip()
+
     try:
-        text = chat_completion(payload).strip()
+        text = _run(max_tokens=4000, timeout=60)
+    except ValueError as exc:
+        if "empty content" not in str(exc):
+            logger.warning("generate_compose_draft failed: %s", exc)
+            raise RuntimeError(f"调用 DeepSeek 失败: {exc}") from exc
+        logger.warning("generate_compose_draft: empty at 4k, retry at 8k")
+        try:
+            text = _run(max_tokens=8000, timeout=120)
+        except Exception as exc2:
+            logger.warning("generate_compose_draft retry failed: %s", exc2)
+            raise RuntimeError(
+                f"调用 DeepSeek 失败(扩预算后仍无输出): {exc2}"
+            ) from exc2
     except Exception as exc:
         logger.warning("generate_compose_draft failed: %s", exc)
         raise RuntimeError(f"调用 DeepSeek 失败: {exc}") from exc
