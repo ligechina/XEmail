@@ -133,6 +133,12 @@ class SyncSettings(BaseModel):
     # fetches: every receive only pulls mail received within the last
     # `fetch_days` days that we haven't already seen.
     fetch_days: int = Field(default=30, ge=1, le=100)
+    # Auto-receive: when the client-side toggle is on, the frontend fires
+    # /api/tasks/receive/start every `auto_receive_interval_minutes`
+    # minutes. Stored on the account so the interval survives restarts.
+    # 0 = the toggle exists but no interval is chosen; UI clamps the
+    # entry to sensible bounds (5–1440 min = 5 min to 24 h).
+    auto_receive_interval_minutes: int = Field(default=15, ge=1, le=1440)
 
 
 class ConfigPayload(BaseModel):

@@ -700,6 +700,21 @@
               已经收过的邮件不会重复处理——按 IMAP UID 水位 + Message-Id 双重去重。
             </div>
           </div>
+          <div class="field">
+            <label for="auto_receive_interval_minutes">自动收信间隔（分钟）</label>
+            <input
+              id="auto_receive_interval_minutes"
+              type="number"
+              min="1"
+              max="1440"
+              value="15"
+            />
+            <div class="desc" style="margin-top: 4px">
+              主界面顶部有「⏱ 自动收信」开关。开启后每隔 N 分钟自动触发一次收取邮件
+              （1–1440 分钟 = 1 分钟到 24 小时）。当已有其他后台任务（收取/分类/重新分类）
+              在跑时，本次自动收信会被延后到下一个周期。
+            </div>
+          </div>
         </div>
       </div>
 
@@ -950,6 +965,7 @@
         $("sync_deletes").checked = false;
         $("sync_folders").checked = false;
         $("fetch_days").value = 30;
+        $("auto_receive_interval_minutes").value = 15;
         updateSyncShortcutState();
       }
 
@@ -977,6 +993,9 @@
         const days = Number(sync.fetch_days);
         $("fetch_days").value =
           Number.isFinite(days) && days >= 1 && days <= 100 ? days : 30;
+        const autoMin = Number(sync.auto_receive_interval_minutes);
+        $("auto_receive_interval_minutes").value =
+          Number.isFinite(autoMin) && autoMin >= 1 && autoMin <= 1440 ? autoMin : 15;
         updateSyncShortcutState();
       }
 
@@ -1278,6 +1297,9 @@
             sync_deletes: $("sync_deletes").checked,
             sync_folders: $("sync_folders").checked,
             fetch_days: clampFetchDays($("fetch_days").value),
+            auto_receive_interval_minutes: clampAutoReceive(
+              $("auto_receive_interval_minutes").value,
+            ),
           },
         };
       }
@@ -1286,6 +1308,12 @@
         const n = Number(raw);
         if (!Number.isFinite(n)) return 30;
         return Math.min(100, Math.max(1, Math.floor(n)));
+      }
+
+      function clampAutoReceive(raw) {
+        const n = Number(raw);
+        if (!Number.isFinite(n)) return 15;
+        return Math.min(1440, Math.max(1, Math.floor(n)));
       }
 
       async function saveConfig(successMessage) {

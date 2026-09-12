@@ -2878,6 +2878,19 @@
           >
             收取邮件
           </button>
+          <label
+            id="auto_receive_toggle_label"
+            title="开启后每隔 N 分钟自动收信一次；N 在「⚙ 设置 → 服务器同步 → 自动收信间隔」中配置。开关状态记录在本机浏览器,切账号或清缓存会重置。"
+            style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;user-select:none;margin-left:2px;font-size:12px"
+          >
+            <input
+              type="checkbox"
+              id="auto_receive_toggle"
+              onchange="onAutoReceiveToggle(this.checked)"
+              style="margin:0"
+            />
+            <span id="auto_receive_toggle_text">⏱ 自动收信</span>
+          </label>
           <button
             class="btn"
             onclick="classifyUnsorted()"
@@ -3672,6 +3685,9 @@
           <h3 id="contacts_picker_title">从通讯录选择</h3>
         </div>
         <div class="modal-body">
+          <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">
+            单击行切换勾选 · <strong>双击行直接添加并关闭</strong>
+          </div>
           <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
             <input
               id="contacts_picker_search"
@@ -4238,6 +4254,7 @@
       let ACTIVE_ACCOUNT = null;
       let composeCarrySource = null;
       let composeCarryFiles = [];
+      let composeCurrentMode = "new";
       let replyingToInboxId = null;
       let folders = [];
       let MAIL_SEARCH = { keyword: "", scope: "fulltext" };
@@ -10140,9 +10157,25 @@
       }
 
       function renderMergedInboxDetail(root, merged) {
-        const items = Array.isArray(merged.__threadItems)
-          ? merged.__threadItems.slice()
-          : [];
+        // Expand the thread across ALL folders. The `merged` argument
+        // was built from currentList() — only the current folder's
+        // members. If the conversation crosses folders (the original
+        // routed to 垃圾邮件 while a reply landed in 工作邮件, say),
+        // attachments living on off-folder members would otherwise be
+        // invisible here. Rebuild once against the full email list and
+        // look up this thread's full membership by __threadKey.
+        let items;
+        const fullMerged = buildMergedInboxList(
+          allEmails.filter((e) => !e.deleted),
+          sent.filter((s) => !s.deleted),
+        ).find((x) => x.__threadKey === merged.__threadKey);
+        if (fullMerged && Array.isArray(fullMerged.__threadItems)) {
+          items = fullMerged.__threadItems.slice();
+        } else {
+          items = Array.isArray(merged.__threadItems)
+            ? merged.__threadItems.slice()
+            : [];
+        }
         items.sort((a, b) =>
           threadItemTime(b).localeCompare(threadItemTime(a))
         );
@@ -11354,22 +11387,30 @@
         });
       }
 
-      // Forward: leave the recipient blank for the user to fill in, prefix
-      // the subject with Fwd: (unless it already is one), quote the original
-      // body, and carry attachments over so the user can decide whether to
-      // include them on send.
+      // Forward: prefix Fwd:, quote original body, and automatically
+      // carry attachments forward — a forward without the original's
+      // attachments is almost never what the user wants (was the old
+      // behavior; user could always dismiss the carry-banner, but the
+      // default flipped the wrong way).
+      // Recipient prefill: reuse the last forward's To/Cc so a series
+      // of "please also send this to <the same person>" forwards does
+      // not require re-typing the address every time.
       function forwardEmail(item) {
         const origSubject = (item.subject || "").trim();
         const subject = subjectAlreadyForward(origSubject)
           ? origSubject
           : `Fwd: ${origSubject}`;
+        const remembered = _readLastRecipients("forward");
         openCompose({
           mode: "forward",
-          to: "",
+          to: remembered.to || "",
+          cc: remembered.cc || "",
+          bcc: remembered.bcc || "",
           subject,
           body: "\n\n" + buildForwardQuote(item),
           originalId: item.id,
           originalAttachments: item.attachments || [],
+          carryAttachmentsByDefault: true,
           replyToInboxId: null,
         });
       }
@@ -11600,6 +11641,11 @@
           drafts = draftList || [];
           sent = sentList || [];
           folders = folderList || [];
+          // Auto-receive scheduler follows the active account: interval
+          // comes from sync.auto_receive_interval_minutes, on/off flag
+          // is per-browser via localStorage. Retriggers the timer if
+          // account switched.
+          try { AutoReceive.syncToolbar(ACTIVE_ACCOUNT); } catch (_) {}
           renderFolders();
           // try to keep current selection alive
           const list = currentList();
@@ -11668,6 +11714,7 @@
           drafts = draftList || [];
           sent = sentList || [];
           folders = folderList || [];
+          try { AutoReceive.syncToolbar(ACTIVE_ACCOUNT); } catch (_) {}
           BOOT_LOADING = false;
           renderFolders();
           renderList();
@@ -11934,13 +11981,189 @@
         });
       }
 
+      // ============== 收件人记忆 (last-used prefill) ==============
+      // Small helpers to remember the To/Cc/Bcc a user picked for the
+      // most recent forward — reused as prefills next time so a series
+      // of "please also send this to <that person>" forwards doesn't
+      // require re-typing the address every time. Also captures any Cc
+      // the user typed on a plain compose (any mode) so the next
+      // compose can suggest the same Cc — matches the user request
+      // "转发或抄送邮件时不必重新输入收件人".
+      //
+      // Storage: per-user, per-mode buckets in localStorage. Cleared
+      // when the user logs out.
+      function _lastRecipientsKey(mode) {
+        const uid = (CURRENT_USER && CURRENT_USER.id) || "anon";
+        return `last_recipients:${uid}:${mode}`;
+      }
+      function _readLastRecipients(mode) {
+        try {
+          const raw = localStorage.getItem(_lastRecipientsKey(mode));
+          if (!raw) return {};
+          const p = JSON.parse(raw);
+          return {
+            to: String(p.to || ""),
+            cc: String(p.cc || ""),
+            bcc: String(p.bcc || ""),
+          };
+        } catch (_) { return {}; }
+      }
+      function _writeLastRecipients(mode, payload) {
+        try {
+          localStorage.setItem(
+            _lastRecipientsKey(mode),
+            JSON.stringify({
+              to: String(payload.to || ""),
+              cc: String(payload.cc || ""),
+              bcc: String(payload.bcc || ""),
+            }),
+          );
+        } catch (_) {}
+      }
+      // Remember the Cc the user typed on a non-reply / non-forward
+      // compose so plain new mails can also suggest the last-used Cc.
+      // Bucket key "cc-history" is separate from the per-mode buckets
+      // so a forward's To doesn't leak into a plain compose prefill.
+      function _rememberCcAcrossModes(cc) {
+        if (!cc || !cc.trim()) return;
+        try {
+          localStorage.setItem(
+            `last_cc_any:${(CURRENT_USER && CURRENT_USER.id) || "anon"}`,
+            cc,
+          );
+        } catch (_) {}
+      }
+      function _readLastCcAny() {
+        try {
+          return localStorage.getItem(
+            `last_cc_any:${(CURRENT_USER && CURRENT_USER.id) || "anon"}`,
+          ) || "";
+        } catch (_) { return ""; }
+      }
+
+      // ============== 自动收信 (auto-receive) ==============
+      // Client-side scheduler that fires receiveEmails() every N minutes
+      // when the toolbar toggle is on. N is per-account, read from
+      // ACTIVE_ACCOUNT.sync.auto_receive_interval_minutes (settings page
+      // writes it via /api/accounts/{id}).
+      //
+      // Design choices:
+      //   • Toggle state is a per-account, per-browser localStorage flag
+      //     (`auto_receive_on:<account_id>`). It's a browser-side switch,
+      //     not persisted per-account — one browser can want auto-fetch
+      //     while another quietly does not.
+      //   • If another background task is already running (TaskPoll.isRunning),
+      //     skip THIS tick and try again next interval — never queue up
+      //     receives. Backend enforces one task per user anyway.
+      //   • On account switch or logout the timer is torn down; the next
+      //     mount re-reads state from the freshly-active account.
+      const AutoReceive = (() => {
+        let timerId = null;
+        let currentAccountId = null;
+        let currentIntervalMs = 0;
+
+        function storageKey(accountId) {
+          return `auto_receive_on:${accountId || ""}`;
+        }
+        function isOn(accountId) {
+          try {
+            return localStorage.getItem(storageKey(accountId)) === "1";
+          } catch (_) { return false; }
+        }
+        function persistOn(accountId, on) {
+          try {
+            if (on) localStorage.setItem(storageKey(accountId), "1");
+            else localStorage.removeItem(storageKey(accountId));
+          } catch (_) {}
+        }
+        function intervalMsFor(account) {
+          const raw = Number(account?.sync?.auto_receive_interval_minutes);
+          const min = Number.isFinite(raw) && raw >= 1 && raw <= 1440 ? raw : 15;
+          return min * 60 * 1000;
+        }
+        function stop() {
+          if (timerId) { clearInterval(timerId); timerId = null; }
+          currentAccountId = null;
+          currentIntervalMs = 0;
+        }
+        async function tick() {
+          // Never spawn an auto-receive while another task is running —
+          // the backend rejects concurrent tasks per user, and firing a
+          // second one just to see the "existing" response wastes a
+          // round-trip. Wait for the next interval instead.
+          if (TaskPoll.isRunning?.()) return;
+          try {
+            await receiveEmails();
+          } catch (_) {
+            // receiveEmails already surfaces its own errors via TaskPoll's
+            // status flow; swallow here so a single failure doesn't kill
+            // the timer.
+          }
+        }
+        function start(account) {
+          stop();
+          if (!account || !account.id) return;
+          currentAccountId = account.id;
+          currentIntervalMs = intervalMsFor(account);
+          timerId = setInterval(tick, currentIntervalMs);
+        }
+        // Sync the toolbar checkbox to the current state and (re)arm the
+        // timer if needed. Called on boot and when the active account
+        // changes.
+        function syncToolbar(account) {
+          const box = document.getElementById("auto_receive_toggle");
+          const txt = document.getElementById("auto_receive_toggle_text");
+          if (!box || !account) { stop(); return; }
+          const on = isOn(account.id);
+          box.checked = on;
+          if (txt) {
+            const raw = Number(account?.sync?.auto_receive_interval_minutes);
+            const min = Number.isFinite(raw) && raw >= 1 && raw <= 1440 ? raw : 15;
+            txt.textContent = on
+              ? `⏱ 自动收信 (${min} 分钟)`
+              : "⏱ 自动收信";
+          }
+          if (on) start(account);
+          else stop();
+        }
+        // User flipped the checkbox in the toolbar.
+        function onToggle(on) {
+          if (!ACTIVE_ACCOUNT) return;
+          persistOn(ACTIVE_ACCOUNT.id, !!on);
+          syncToolbar(ACTIVE_ACCOUNT);
+          if (on) {
+            setStatus(
+              `已开启自动收信,每 ${
+                Math.round(currentIntervalMs / 60000)
+              } 分钟一次`,
+              "success",
+            );
+          } else {
+            setStatus("已关闭自动收信", "info");
+          }
+        }
+        return { syncToolbar, stop, onToggle };
+      })();
+      function onAutoReceiveToggle(on) { AutoReceive.onToggle(on); }
+
       // ============== compose ==============
       function openCompose(prefill) {
         const data = prefill || {};
         editingDraftId = data.id || null;
         const mode = data.mode || (editingDraftId ? "draft" : "new");
+        // Track the mode of this compose window so sendEmail knows
+        // which last-recipients bucket to update on success.
+        composeCurrentMode = mode;
+        // Prefill To/Cc/Bcc from the caller's data. If the caller
+        // omitted Cc (e.g. plain compose or forward without a stored
+        // Cc), fall back to the last-used Cc so a series of mails to
+        // the same lead-cc doesn't require re-typing.
         $("send_to").value = data.to || "";
-        $("send_cc").value = data.cc || "";
+        let ccPrefill = data.cc || "";
+        if (!ccPrefill && mode !== "reply" && mode !== "draft" && mode !== "reedit") {
+          ccPrefill = _readLastCcAny();
+        }
+        $("send_cc").value = ccPrefill;
         $("send_bcc").value = data.bcc || "";
         // send_independently is opt-in per-open: default off, but honor
         // the caller's `send_independently: true` when it's a
@@ -11948,10 +12171,10 @@
         if ($("send_independently")) {
           $("send_independently").checked = !!data.send_independently;
         }
-        // Reveal Cc / Bcc rows when the prefill carries values (e.g.
-        // editing a draft that had them); collapse otherwise so the form
-        // stays compact for the common case.
-        setRecipientFieldVisible("cc", !!(data.cc && data.cc.trim()));
+        // Reveal Cc / Bcc rows when we ended up with values (either the
+        // caller passed one or the fallback filled Cc in); collapse
+        // otherwise so the form stays compact for the common case.
+        setRecipientFieldVisible("cc", !!(ccPrefill && ccPrefill.trim()));
         setRecipientFieldVisible("bcc", !!(data.bcc && data.bcc.trim()));
         $("send_subject").value = data.subject || "";
         // Auto-append the active account's signature to brand-new emails
@@ -11993,9 +12216,13 @@
         };
         composeAttachments = (data.attachments || []).slice();
         const original = data.originalAttachments || [];
-        // Reply / forward / re-edit all carry the original's attachments
-        // forward — the user can drop them from the banner if they don't
-        // want to include them.
+        // Reply / forward / re-edit can carry the original's attachments
+        // forward. Two flavors:
+        //   • Forward → auto-attach by default (rare that you want to
+        //     forward a mail WITHOUT its attachments). Banner offers a
+        //     one-click 「移除附件」 escape hatch.
+        //   • Reply / reedit → offer the carry banner as before; user
+        //     opts IN with 「携带」.
         if (
           (mode === "reply" || mode === "forward" || mode === "reedit") &&
           original.length > 0
@@ -12009,6 +12236,19 @@
         replyingToInboxId = data.replyToInboxId || null;
         renderComposeAttachments();
         renderCarryBanner();
+        // Forward with the "carry by default" flag → auto-attach after
+        // the initial render, then update the banner to show the
+        // remove/keep option instead of add/dismiss.
+        if (
+          mode === "forward" &&
+          data.carryAttachmentsByDefault &&
+          composeCarrySource
+        ) {
+          // Fire-and-forget — this creates the draft (if needed) and
+          // materialises the attachments server-side; the UI updates
+          // in place once the response arrives.
+          carryOriginalAttachments().catch(() => {});
+        }
         // The auto-reply panel is reply-only — hidden for new emails and
         // draft edits. Reset any leftover intent text from a prior session.
         const arPanel = $("auto_reply_panel");
@@ -12653,6 +12893,18 @@
           setStatus(sendIndependently
             ? "邮件已分别独立发送,已存入已发送"
             : "邮件发送成功，已存入已发送", "success");
+          // Remember the recipients so the next same-mode compose can
+          // prefill them. Only for forward right now — replies naturally
+          // route to the sender of the mail being replied to, so a
+          // stored "last reply recipient" would usually be wrong.
+          try {
+            if (composeCurrentMode === "forward") {
+              _writeLastRecipients("forward", { to, cc, bcc });
+            }
+            // Every mode's Cc goes into the "cc-any" bucket used as a
+            // fallback prefill for the next plain compose.
+            if (cc) _rememberCcAcrossModes(cc);
+          } catch (_) {}
           editingDraftId = null;
           $("send_to").value = "";
           $("send_cc").value = "";
@@ -12908,6 +13160,18 @@
             if (cb.checked) CONTACTS_PICKER_SELECTED.add(cid);
             else CONTACTS_PICKER_SELECTED.delete(cid);
             updateContactsPickerSummary();
+          };
+          // Double-click = "select this one and add it now" —
+          // matches how users expect a picker to behave (single-item
+          // pick-and-go). Overrides any current selection so a
+          // dblclick on a row is guaranteed to include that row.
+          row.ondblclick = (e) => {
+            e.preventDefault();
+            const cid = row.dataset.cid;
+            if (!cid) return;
+            CONTACTS_PICKER_SELECTED.clear();
+            CONTACTS_PICKER_SELECTED.add(cid);
+            confirmContactsPicker();
           };
         });
         updateContactsPickerSummary();
