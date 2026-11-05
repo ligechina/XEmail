@@ -206,6 +206,11 @@ CREATE TABLE IF NOT EXISTS field_configs (
   account_id TEXT PRIMARY KEY,
   data_json  TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS forward_rules (
+  account_id TEXT PRIMARY KEY,
+  data_json  TEXT NOT NULL
+);
 """
 
 
@@ -2074,6 +2079,73 @@ def write_field_config_for_account(
             "INSERT OR REPLACE INTO field_configs (account_id, data_json) "
             "VALUES (?, ?)",
             (account_id, json.dumps(cfg, ensure_ascii=False)),
+        )
+
+
+# ── Folder → email auto-forward rules (per account) ─────────────────────
+#
+# Row shape: {"folder": "<folder path>", "destination": "<email>", "enabled": bool}
+# A single row per account, data_json is the full list. Simpler than
+# one-row-per-rule for a list that stays short in practice.
+
+def read_forward_rules_for_account(account_id: str) -> List[Dict[str, Any]]:
+    if not account_id:
+        return []
+    row = _get_conn().execute(
+        "SELECT data_json FROM forward_rules WHERE account_id = ?", (account_id,)
+    ).fetchone()
+    if not row:
+        return []
+    try:
+        data = json.loads(row[0])
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        folder = str(item.get("folder") or "").strip()
+        dest = str(item.get("destination") or "").strip()
+        if not folder or not dest:
+            continue
+        out.append({
+            "folder": folder,
+            "destination": dest,
+            "enabled": bool(item.get("enabled", True)),
+        })
+    return out
+
+
+def write_forward_rules_for_account(
+    account_id: str, rules: List[Dict[str, Any]]
+) -> None:
+    if not account_id:
+        return
+    cleaned: List[Dict[str, Any]] = []
+    seen: set = set()
+    for item in rules or []:
+        if not isinstance(item, dict):
+            continue
+        folder = str(item.get("folder") or "").strip()
+        dest = str(item.get("destination") or "").strip()
+        if not folder or not dest:
+            continue
+        key = (folder, dest.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append({
+            "folder": folder,
+            "destination": dest,
+            "enabled": bool(item.get("enabled", True)),
+        })
+    with _write_txn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO forward_rules (account_id, data_json) "
+            "VALUES (?, ?)",
+            (account_id, json.dumps(cleaned, ensure_ascii=False)),
         )
 
 

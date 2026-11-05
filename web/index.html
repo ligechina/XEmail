@@ -40,6 +40,40 @@
       * {
         box-sizing: border-box;
       }
+      /* Default: content everywhere is text-selectable so the user can copy
+         anything they can see. Chrome bits (tabs, drag handles, section
+         headers, buttons that shouldn't bleed text selection) still opt out
+         via their own class-level `user-select: none` rules below — those
+         win on specificity. Buttons and draggable list rows need an extra
+         opt-in because UA defaults block selection on them. */
+      html,
+      body {
+        -webkit-user-select: text;
+        user-select: text;
+      }
+      /* UA stylesheet applies user-select:none to buttons by default, which
+         is why `.addr-chip` (a <button> rendered as a sender/receiver chip
+         with the email address inside) can't be copied. Re-enable it so the
+         address text can be selected; the button's click handler still
+         fires normally. */
+      button {
+        -webkit-user-select: text;
+        user-select: text;
+      }
+      /* draggable="true" elements block text selection in Chromium when the
+         mousedown lands anywhere on the row. Explicitly re-enable selection
+         on the mail-row's text spans so the user can select a subject, a
+         sender, or a snippet — drag still works from the row's padding. */
+      .mail-item .who,
+      .mail-item .subject,
+      .mail-item .snippet,
+      .mail-item .time,
+      .mail-item .tag,
+      .folder .label,
+      .folder .name {
+        -webkit-user-select: text;
+        user-select: text;
+      }
       html,
       body {
         height: 100%;
@@ -231,7 +265,9 @@
         flex-shrink: 0;
       }
 
-      /* Contacts picker modal rows. */
+      /* Contacts picker modal rows. The row is clickable (toggles the
+         checkbox) but the name/email strings are also content a user may
+         want to copy, so we leave selection on. */
       .contact-pick-row {
         display: flex;
         align-items: center;
@@ -239,7 +275,6 @@
         padding: 8px 10px;
         border-bottom: 1px solid var(--border);
         cursor: pointer;
-        user-select: none;
       }
       .contact-pick-row:last-child {
         border-bottom: 0;
@@ -1220,6 +1255,42 @@
         font-size: 12px;
         color: var(--text-muted, #6b7280);
         font-style: italic;
+      }
+      .fwd-rule-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin: 6px 12px;
+        padding: 6px 8px;
+        background: var(--surface-alt, var(--surface));
+        border: 1px solid var(--border);
+        border-radius: 6px;
+      }
+      .fwd-rule-row .fwd-folder {
+        flex: 0 0 36%;
+        min-width: 0;
+        font-size: 12px;
+      }
+      .fwd-rule-row .fwd-arrow {
+        color: var(--text-muted, #6b7280);
+        font-weight: 600;
+      }
+      .fwd-rule-row .fwd-dest {
+        flex: 1 1 auto;
+        min-width: 0;
+        font-size: 12px;
+        padding: 4px 6px;
+      }
+      .fwd-rule-row .fwd-enabled {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        font-size: 11.5px;
+        color: var(--text-muted, #6b7280);
+        white-space: nowrap;
+      }
+      .fwd-rule-actions {
+        margin: 10px 12px 6px;
       }
       /* Sidebar */
       .sidebar {
@@ -3156,6 +3227,7 @@
           </p>
           <div id="field_config_editor" style="display: none"></div>
           <div id="fixed_rules_section"></div>
+          <div id="forward_rules_section"></div>
           <div id="system_prompt_section"></div>
           <div id="prompts_section"></div>
           <div id="experiences_section"></div>
@@ -4321,6 +4393,14 @@
         let currentTaskKind = null;
         let pollTimer = null;
         let doneCallback = null;   // called with the terminal TaskInfo
+        // Silent mode: track a task without opening the progress modal.
+        // Used by auto-receive so the user can keep working — no popup,
+        // auto-acked and auto-detached on terminal so the next tick can
+        // fire. If a user-initiated start happens while silent is running,
+        // the silent task is promoted to visible (same server-side task;
+        // the modal just un-hides).
+        let silentMode = false;
+        let lastInfo = null;
         // How to react to task completion — set by the caller that
         // started the task (e.g. receive should refreshAll() on done).
         const KIND_ON_DONE = {
@@ -4331,6 +4411,9 @@
 
         function isRunning() {
           return !!currentTaskId;
+        }
+        function isSilent() {
+          return !!currentTaskId && silentMode;
         }
 
         function openModal() {
@@ -4447,48 +4530,118 @@
             closeModal();
             return;
           }
-          renderTaskInfo(info);
+          lastInfo = info;
+          if (!silentMode) renderTaskInfo(info);
           if (["done", "error", "cancelled"].includes(info.status)) {
-            // Stop polling — modal stays open in "closable" state until
-            // the user hits 关闭.
             if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
-            if (doneCallback) {
-              try { doneCallback(info); } catch (_) {}
-              doneCallback = null;
+            const cb = doneCallback;
+            doneCallback = null;
+            if (silentMode) {
+              // Silent tasks auto-ack + auto-detach so the slot clears
+              // and the next auto-receive tick can run. On error we
+              // surface a friendly toast — no blocking dialog that would
+              // interrupt the user mid-work.
+              const tid = currentTaskId;
+              api(`/api/tasks/${encodeURIComponent(tid)}/ack`, { method: "POST" })
+                .catch(() => {});
+              detach();
+              if (info.status === "error") {
+                try { setStatus(`自动收信失败: ${info.error || "未知错误"}`, "error"); } catch (_) {}
+              }
             }
+            if (cb) { try { cb(info); } catch (_) {} }
             return;
           }
-          pollTimer = setTimeout(poll, 500);
+          pollTimer = setTimeout(poll, silentMode ? 1500 : 500);
         }
 
-        function attach(info, onDone) {
+        function attach(info, onDone, silent) {
           currentTaskId = info.id;
           currentTaskKind = info.kind;
           doneCallback = onDone || null;
-          renderTaskInfo(info);
-          openModal();
+          silentMode = !!silent;
+          lastInfo = info;
+          if (!silentMode) {
+            renderTaskInfo(info);
+            openModal();
+          }
           if (pollTimer) clearTimeout(pollTimer);
-          pollTimer = setTimeout(poll, 300);
+          pollTimer = setTimeout(poll, silentMode ? 1200 : 300);
         }
 
         function detach() {
           currentTaskId = null;
           currentTaskKind = null;
           doneCallback = null;
+          silentMode = false;
+          lastInfo = null;
           if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
         }
 
+        // If a silent task is currently tracked, un-hide it: render the
+        // last polled state and open the modal. Called when a user
+        // action wants the modal UI but the backend task is the same
+        // already-running one.
+        function promoteToVisible() {
+          if (!currentTaskId || !silentMode) return false;
+          silentMode = false;
+          if (lastInfo) renderTaskInfo(lastInfo);
+          openModal();
+          return true;
+        }
+
+        const KIND_LABELS = {
+          receive: "收取邮件",
+          classify_unsorted: "执行分类",
+          reclassify_all: "重新分类",
+          reclassify_scope: "重新分类",
+          ai_search: "智能检索",
+        };
+
         async function start(startUrl, opts) {
           opts = opts || {};
+          const silent = !!opts.silent;
+          const expectedKind = opts.expectedKind || null;
+          // Silent start while something is already tracked → skip. We
+          // never want to queue up or race: if another task is still
+          // running (visible or silent), the backend returns it anyway;
+          // the next tick will try again on its own.
+          if (silent && currentTaskId) return null;
           try {
             const info = await api(startUrl, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: opts.body ? JSON.stringify(opts.body) : undefined,
             });
-            attach(info, opts.onDone);
+            // Conflict detection: the backend returns the already-running
+            // task (any kind) when the user has an active task. If the
+            // kind differs from what the user just asked for, that's a
+            // real conflict — tell them, then show the running task's
+            // modal so they can cancel or wait.
+            if (
+              !silent
+              && expectedKind
+              && info.kind
+              && info.kind !== expectedKind
+              && info.status === "running"
+            ) {
+              const runningLabel = KIND_LABELS[info.kind] || info.kind;
+              const wantedLabel = KIND_LABELS[expectedKind] || expectedKind;
+              alert(
+                `无法启动「${wantedLabel}」：当前正在执行「${runningLabel}」。` +
+                `请等待其完成，或在弹出的进度窗口中取消它。`
+              );
+              attach(info, null, false);
+              return null;
+            }
+            attach(info, opts.onDone, silent);
             return info;
           } catch (err) {
+            if (silent) {
+              // Swallow — auto-receive must never pop a blocking dialog.
+              try { console.warn("auto-receive start failed:", err && err.message); } catch (_) {}
+              return null;
+            }
             alert((err && err.message) || String(err));
             return null;
           }
@@ -4496,7 +4649,10 @@
 
         async function reattachIfActive() {
           // Called on page boot. If there's a running task server-side,
-          // reopen the modal + reattach the poller.
+          // reopen the modal + reattach the poller. (We can't know from
+          // the server whether it was originally started silently, so
+          // after a reload it always reattaches visibly — the user can
+          // close it.)
           let resp;
           try {
             resp = await api("/api/tasks/active");
@@ -4504,11 +4660,8 @@
             return;
           }
           if (resp && resp.task) {
-            // Give the caller a chance to hook a done callback so
-            // e.g. reattached receive still triggers refreshAll on
-            // completion.
             const onDone = KIND_ON_DONE[resp.task.kind] || null;
-            attach(resp.task, onDone);
+            attach(resp.task, onDone, false);
           }
         }
 
@@ -4555,7 +4708,7 @@
         }
 
         return {
-          start, reattachIfActive, isRunning,
+          start, reattachIfActive, isRunning, isSilent, promoteToVisible,
           pauseCurrent, resumeCurrent, cancelCurrent, closeCurrent,
           setKindDoneHook,
         };
@@ -4834,10 +4987,15 @@
       // when they want to inspect or edit it.
       let SECTION_COLLAPSED = {
         fixed_rules: true,
+        forward_rules: true,
         system: true,
         prompts: true,
         experiences: true,
       };
+
+      // Loaded lazily on first renderPrompts() so an older build with no
+      // /api/forward-rules endpoint doesn't crash the panel.
+      let FORWARD_RULES_STATE = { loaded: false, rules: [], error: "" };
 
       async function loadPrompts() {
         const errEl = $("prompts_load_error");
@@ -5812,9 +5970,172 @@
         renderFieldSummary();
         if (FIELD_EDITOR_OPEN) renderFieldEditor();
         renderFixedRules();
+        renderForwardRules();
         renderSystemPrompt();
         renderUserPrompts();
         renderExperiences();
+      }
+
+      async function loadForwardRules() {
+        try {
+          const data = await api("/api/forward-rules");
+          FORWARD_RULES_STATE = {
+            loaded: true,
+            rules: Array.isArray(data) ? data : [],
+            error: "",
+          };
+        } catch (err) {
+          FORWARD_RULES_STATE = {
+            loaded: true,
+            rules: [],
+            error: (err && err.message) || "加载失败",
+          };
+        }
+        renderForwardRules();
+      }
+
+      function renderForwardRules() {
+        const wrap = $("forward_rules_section");
+        if (!wrap) return;
+        if (!FORWARD_RULES_STATE.loaded) {
+          FORWARD_RULES_STATE.loaded = true;
+          loadForwardRules();
+          wrap.innerHTML = `<div class="section-head collapsed"><span class="section-title">${t("📨 文件夹自动转发")}</span><span class="chev">▼</span></div>`;
+          return;
+        }
+        const rules = FORWARD_RULES_STATE.rules || [];
+        const folders = (PROMPTS_STATE.available_folders || []).filter(
+          (f) => f && f !== "未分类"
+        );
+        const collapsed = !!SECTION_COLLAPSED.forward_rules;
+        const headClass = collapsed ? "collapsed" : "";
+        const bodyClass = collapsed ? "collapsed" : "";
+        const enabledCount = rules.filter((r) => r.enabled).length;
+        const countBadge = rules.length
+          ? `<span class="section-count">${enabledCount}/${rules.length}</span>`
+          : "";
+        const rows = rules.length
+          ? rules
+              .map(
+                (r, i) => `
+            <div class="fwd-rule-row" data-idx="${i}">
+              <select class="fwd-folder" data-idx="${i}">
+                ${folders
+                  .map(
+                    (f) =>
+                      `<option value="${escapeHtml(f)}"${f === r.folder ? " selected" : ""}>${escapeHtml(f)}</option>`
+                  )
+                  .join("")}
+                ${folders.includes(r.folder) ? "" : `<option value="${escapeHtml(r.folder)}" selected>${escapeHtml(r.folder)} (已删除)</option>`}
+              </select>
+              <span class="fwd-arrow">→</span>
+              <input type="email" class="fwd-dest" data-idx="${i}"
+                placeholder="target@example.com"
+                value="${escapeHtml(r.destination || "")}" />
+              <label class="fwd-enabled" title="${t("启用/停用")}">
+                <input type="checkbox" data-idx="${i}" ${r.enabled ? "checked" : ""} />
+                ${t("启用")}
+              </label>
+              <button class="btn btn-danger" data-fwd-act="del" data-idx="${i}" title="${t("删除此规则")}" style="padding:3px 8px">✕</button>
+            </div>`
+              )
+              .join("")
+          : `<div class="empty-hint">${t("尚未设置任何自动转发规则。")}</div>`;
+        const err = FORWARD_RULES_STATE.error
+          ? `<div style="margin:6px 12px;color:var(--danger,#c33);font-size:12px">${escapeHtml(FORWARD_RULES_STATE.error)}</div>`
+          : "";
+        wrap.innerHTML = `
+          <div class="section-head ${headClass}" onclick="toggleSection('forward_rules')">
+            <span class="section-title">${t("📨 文件夹自动转发")} ${countBadge}</span>
+            <span class="chev">▼</span>
+          </div>
+          <div class="section-body ${bodyClass}">
+            <details class="help">
+              <summary>${t("说明")}</summary>
+              <div class="help-body">
+                ${t("邮件被分类到指定文件夹时，自动把该邮件（含附件）转发到目标邮箱。 同一封邮件对同一「文件夹→目标」组合只转发一次，不会因重新分类或移动而重复发送。 系统会使用当前账号的 SMTP 发件，禁止转发给自己以避免循环。")}
+              </div>
+            </details>
+            ${err}
+            <div id="fwd_rules_list" style="margin-top:8px">${rows}</div>
+            <div class="fwd-rule-actions" style="margin-top:10px;display:flex;gap:8px">
+              <button class="btn" id="fwd_rule_add">＋ ${t("添加规则")}</button>
+              <button class="btn btn-primary" id="fwd_rule_save">${t("保存")}</button>
+            </div>
+          </div>
+        `;
+        wrap.querySelectorAll(".fwd-folder").forEach((el) => {
+          el.onchange = (e) => {
+            const idx = +e.target.dataset.idx;
+            FORWARD_RULES_STATE.rules[idx].folder = e.target.value;
+          };
+        });
+        wrap.querySelectorAll(".fwd-dest").forEach((el) => {
+          el.oninput = (e) => {
+            const idx = +e.target.dataset.idx;
+            FORWARD_RULES_STATE.rules[idx].destination = e.target.value;
+          };
+        });
+        wrap.querySelectorAll('.fwd-enabled input[type="checkbox"]').forEach((el) => {
+          el.onchange = (e) => {
+            const idx = +e.target.dataset.idx;
+            FORWARD_RULES_STATE.rules[idx].enabled = e.target.checked;
+          };
+        });
+        wrap.querySelectorAll('[data-fwd-act="del"]').forEach((el) => {
+          el.onclick = () => {
+            const idx = +el.dataset.idx;
+            FORWARD_RULES_STATE.rules.splice(idx, 1);
+            renderForwardRules();
+          };
+        });
+        const addBtn = $("fwd_rule_add");
+        if (addBtn) {
+          addBtn.onclick = () => {
+            if (folders.length === 0) {
+              alert(t("当前账号还没有可选文件夹，请先在左侧新建子文件夹。"));
+              return;
+            }
+            FORWARD_RULES_STATE.rules.push({
+              folder: folders[0],
+              destination: "",
+              enabled: true,
+            });
+            renderForwardRules();
+          };
+        }
+        const saveBtn = $("fwd_rule_save");
+        if (saveBtn) saveBtn.onclick = saveForwardRules;
+      }
+
+      async function saveForwardRules() {
+        const rules = (FORWARD_RULES_STATE.rules || []).map((r) => ({
+          folder: (r.folder || "").trim(),
+          destination: (r.destination || "").trim(),
+          enabled: !!r.enabled,
+        }));
+        for (const r of rules) {
+          if (!r.folder || !r.destination) {
+            alert(t("每条规则都要填写文件夹和目标邮箱。"));
+            return;
+          }
+          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(r.destination)) {
+            alert(`${t("目标邮箱格式不正确：")}${r.destination}`);
+            return;
+          }
+        }
+        try {
+          const data = await api("/api/forward-rules", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ rules }),
+          });
+          FORWARD_RULES_STATE = { loaded: true, rules: data || [], error: "" };
+          renderForwardRules();
+          setStatus(t("已保存自动转发规则"), "success");
+        } catch (err) {
+          setStatus(err.message, "error");
+        }
       }
 
       function renderSystemPrompt() {
@@ -8040,6 +8361,7 @@
         if (!window.confirm(msg)) return;
         await TaskPoll.start("/api/tasks/reclassify-scope/start", {
           body: { scope, folder },
+          expectedKind: "reclassify_all",
           onDone: (info) => {
             const r = info.result || {};
             const total = r.total ?? 0;
@@ -8968,6 +9290,7 @@
             scope_kind: scopeKind,
             scope_folder: scopeFolder,
           },
+          expectedKind: "ai_search",
           onDone: (info) => {
             // Only "done" is a successful completion. cancelled / error
             // must NOT install an AI filter — otherwise the frontend
@@ -10756,6 +11079,12 @@
         $("btn_exp_suggest_add").disabled = true;
         $("btn_exp_suggest_add").textContent = t("＋ 新增经验");
         $("btn_exp_suggest_reuse").style.display = "none";
+        // Reset disabled too — previously only .display got reset, so a
+        // successful reuse (which disables all three buttons then closes
+        // the modal via confirmExperienceSuggest without re-enabling)
+        // left the reuse button permanently disabled on the next open.
+        // Repros as "clicking 复用现有 does nothing" the second time.
+        $("btn_exp_suggest_reuse").disabled = false;
         $("btn_exp_suggest_skip").disabled = false;
         m.classList.add("open");
 
@@ -11738,6 +12067,7 @@
         // the progress modal + pause/resume/cancel and reattaches on
         // navigation. See app/services/task_registry.py.
         await TaskPoll.start("/api/tasks/classify-unsorted/start", {
+          expectedKind: "classify_unsorted",
           onDone: (info) => {
             const r = info.result || {};
             const total = r.total ?? 0;
@@ -11774,6 +12104,7 @@
             "确定继续吗？";
         if (!window.confirm(msg)) return;
         await TaskPoll.start("/api/tasks/reclassify-all/start", {
+          expectedKind: "reclassify_all",
           onDone: (info) => {
             const r = info.result || {};
             const total = r.total ?? 0;
@@ -11952,7 +12283,7 @@
         }
       }
 
-      async function receiveEmails() {
+      async function receiveEmails(opts) {
         // Backend runs receive as a background task with pause/cancel
         // controls; day window is per-account (set in 设置 → 服务器同步)
         // and read from the account's sync.fetch_days when start() sends
@@ -11960,22 +12291,38 @@
         // /api/tasks/{id} until terminal — batch persistence still fires
         // during the run, so refreshAll() on done is enough to reflect
         // everything the user just fetched.
+        //
+        // `opts.silent`: when true (used by auto-receive), bypass the
+        // modal completely so the user can keep working. The final
+        // refreshAll + status toast still fires on done.
+        const silent = !!(opts && opts.silent);
         await TaskPoll.start("/api/tasks/receive/start", {
+          silent,
+          expectedKind: "receive",
           onDone: (info) => {
             const r = info.result || {};
             const f = r.fetched ?? 0;
             const s = r.stored ?? 0;
             const skipCount = r.skipped ?? 0;
             const en = I18n.getLang() === "en";
-            let message = en
+            const prefix = silent
+              ? (en ? "Auto-fetch: " : "自动收信：")
+              : "";
+            let message = prefix + (en
               ? `Fetch complete: server returned ${f}, added ${s}`
-              : `收取完成：服务器返回 ${f} 封，新增 ${s} 封`;
+              : `收取完成：服务器返回 ${f} 封，新增 ${s} 封`);
             if (skipCount) {
               message += en
                 ? `, skipped ${skipCount} (see server logs)`
                 : `，跳过 ${skipCount} 封（详见服务器日志）`;
             }
-            setStatus(message, skipCount ? "error" : "success");
+            // Silent auto-runs stay quiet on "no new mail" — a toast on
+            // every empty fetch becomes noise. Only surface when
+            // something changed or when the run hit an error.
+            const hasChange = s > 0 || skipCount > 0 || info.status === "error";
+            if (!silent || hasChange) {
+              setStatus(message, skipCount ? "error" : "success");
+            }
             refreshAll().catch(() => {});
           },
         });
@@ -12090,10 +12437,12 @@
           // Never spawn an auto-receive while another task is running —
           // the backend rejects concurrent tasks per user, and firing a
           // second one just to see the "existing" response wastes a
-          // round-trip. Wait for the next interval instead.
+          // round-trip. Wait for the next interval instead. Silent mode
+          // in receiveEmails() also auto-detaches on terminal so the
+          // slot clears for the next tick.
           if (TaskPoll.isRunning?.()) return;
           try {
-            await receiveEmails();
+            await receiveEmails({ silent: true });
           } catch (_) {
             // receiveEmails already surfaces its own errors via TaskPoll's
             // status flow; swallow here so a single failure doesn't kill
@@ -12583,9 +12932,28 @@
         $("attach_file_input").click();
       }
 
+      const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024;
+
       async function onAttachFilesChosen(e) {
         const files = Array.from(e.target.files || []);
         if (files.length === 0) return;
+        const oversized = files.filter((f) => f.size > MAX_ATTACHMENT_BYTES);
+        if (oversized.length > 0) {
+          const limitMB = MAX_ATTACHMENT_BYTES / (1024 * 1024);
+          const lines = oversized.map(
+            (f) => `· ${f.name} (${(f.size / (1024 * 1024)).toFixed(1)} MB)`
+          );
+          alert(
+            `以下附件超过 ${limitMB}MB 单附件上限，无法添加:\n${lines.join("\n")}\n\n建议改用网盘链接发送。`
+          );
+          const kept = files.filter((f) => f.size <= MAX_ATTACHMENT_BYTES);
+          if (kept.length === 0) {
+            e.target.value = "";
+            return;
+          }
+          files.length = 0;
+          files.push(...kept);
+        }
         if (!editingDraftId) {
           const ok = await ensureDraftExists();
           if (!ok) return;
@@ -12594,6 +12962,7 @@
         let lastErr = "";
         for (const file of files) {
           try {
+            setStatus(`正在上传附件 ${file.name}…`, "info");
             const form = new FormData();
             form.append("file", file);
             // credentials: "same-origin" matches every other fetch in this

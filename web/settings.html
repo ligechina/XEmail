@@ -38,6 +38,18 @@
       * {
         box-sizing: border-box;
       }
+      /* All content is text-selectable by default so settings values can
+         be copied. Chrome bits with their own user-select:none (help
+         toggles, section heads) still win on specificity. Buttons need
+         an explicit opt-in because UA default blocks selection on them. */
+      html, body {
+        -webkit-user-select: text;
+        user-select: text;
+      }
+      button {
+        -webkit-user-select: text;
+        user-select: text;
+      }
       body {
         margin: 0;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",

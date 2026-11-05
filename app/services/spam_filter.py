@@ -1509,34 +1509,54 @@ def generate_compose_draft(
 def _post_deepseek(req: urllib.request.Request, timeout: int) -> str:
     """POST once respecting the system HTTP proxy; on the specific class of
     failures that indicate the proxy itself is broken (Tunnel CONNECT 5xx,
-    "Cannot connect to proxy"), retry ONCE with the direct opener.
+    "Cannot connect to proxy", ECONNREFUSED to a proxy that isn't
+    running, or any transport-level URLError when a system proxy was
+    configured), retry ONCE with the direct opener.
 
     Rationale: corporate networks legitimately require going through a
     proxy, so we still try that first. But a common home-user footgun is
     installing an HTTP debug tool (MacPacket, Charles, Proxyman) that
     registers itself as the system proxy in System Settings → Network →
     Proxies — those tools happily terminate localhost CONNECT but often
-    refuse or 5xx CONNECTs to arbitrary remote endpoints, taking out the
-    entire LLM path. The direct-fallback keeps DeepSeek reachable in that
-    scenario without breaking corporate users who need the proxy path."""
+    refuse or 5xx CONNECTs to arbitrary remote endpoints, OR the tool
+    isn't running at all and the TCP connect to 127.0.0.1:<proxy_port>
+    just fails with ECONNREFUSED, taking out the entire LLM path. The
+    direct-fallback keeps DeepSeek reachable in those scenarios without
+    breaking corporate users who need the proxy path."""
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.read().decode("utf-8", errors="replace")
     except urllib.error.URLError as exc:
         msg = str(exc).lower()
+        # Known proxy-failure substrings (narrow, high-signal).
         looks_like_proxy_failure = (
             "tunnel connection failed" in msg
             or "cannot connect to proxy" in msg
             or "proxyerror" in msg
+            or "connection refused" in msg       # ECONNREFUSED — proxy process not running
+            or "econnrefused" in msg
+            or "errno 61" in msg                 # macOS numeric form
         )
-        if not looks_like_proxy_failure:
+        # Broader safety net: if the system HAS a proxy configured and
+        # any URLError bubbled up, there's a high chance the proxy is to
+        # blame — retry direct once. For users without a configured
+        # proxy, this stays a no-op (direct == same path).
+        has_system_proxy = bool(urllib.request.getproxies())
+        if not (looks_like_proxy_failure or has_system_proxy):
             raise
         logger.warning(
             "System HTTP proxy failed for DeepSeek call (%s); retrying direct.",
             exc,
         )
-        with _DIRECT_HTTP.open(req, timeout=timeout) as resp:
-            return resp.read().decode("utf-8", errors="replace")
+        try:
+            with _DIRECT_HTTP.open(req, timeout=timeout) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+        except urllib.error.URLError as exc2:
+            # Direct also failed — surface the ORIGINAL error so the
+            # user sees "connection refused via proxy" instead of a
+            # cryptic second-attempt message that hides the cause.
+            logger.warning("Direct DeepSeek fallback also failed: %s", exc2)
+            raise exc
 
 
 def chat_completion(payload: dict, *, timeout: Optional[int] = None) -> str:

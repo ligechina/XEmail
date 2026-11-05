@@ -79,6 +79,8 @@ from app.models import (
     FixedRuleUpdate,
     FixedRuleValidateRequest,
     FixedRuleValidateResponse,
+    ForwardRule,
+    ForwardRulesPayload,
     LlmConfigStatus,
     LlmConfigUpdate,
     LlmFieldConfig,
@@ -193,6 +195,7 @@ from app.storage import (
     import_prompts_for_account,
     read_field_config_for_account,
     read_folders,
+    read_forward_rules_for_account,
     read_sent,
     read_system_mode,
     read_system_spam_prompt,
@@ -215,6 +218,7 @@ from app.storage import (
     write_emails,
     write_field_config_for_account,
     write_folders,
+    write_forward_rules_for_account,
     write_llm_api_key,
     write_sent,
     write_system_mode,
@@ -232,7 +236,7 @@ from app.services.spam_filter import (
     summarize_email_for_reply,
 )
 
-MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
 
 app = FastAPI(title="XEmail", version="0.1.0")
 
@@ -1626,6 +1630,7 @@ def reclassify_single_email(
     target["important"] = bool(important)
     target["spam_reason"] = reason
     _append_classification_trace(target, trace)
+    _maybe_auto_forward(target)
     upsert_email(target)
     return EmailRecord(**target)
 
@@ -1849,6 +1854,7 @@ def recategorize_with_reason(
         raise HTTPException(status_code=400, detail="邮件已在该分类中。")
 
     target["category"] = new_cat
+    _maybe_auto_forward(target)
     upsert_email(target)
 
     # Best-effort IMAP MOVE for accounts opted into folder sync — same path
@@ -2645,6 +2651,7 @@ def classify_unsorted(user: User = Depends(current_user)) -> ClassifyUnsortedRes
             rec["spam_reason"] = reason
             remaining += 1
         _append_classification_trace(rec, trace)
+        _maybe_auto_forward(rec)
 
     write_emails(emails)
     return ClassifyUnsortedResult(
@@ -2763,6 +2770,7 @@ def _classify_worker_for_scope(
                         rec["spam_reason"] = reason
                         remaining += 1
                 _append_classification_trace(rec, trace)
+                _maybe_auto_forward(rec)
                 # Queue for the next batch flush. Skipped-due-to-exception
                 # rows do NOT go into pending_flush — nothing changed, no
                 # need to overwrite the DB row with an identical copy.
@@ -2929,6 +2937,11 @@ def start_receive_task(
                         except Exception:
                             continue
                     rec["attachments"] = list_attachments_meta(rec["id"])
+                # Only newly-classified records trigger auto-forward.
+                # dedupe_by_message_id keeps existing records untouched for
+                # already-seen message_ids, so this fires exactly once per
+                # (email, folder) pair even across repeated receives.
+                _maybe_auto_forward(rec)
                 finalized.append(rec)
 
             upsert_emails(finalized)
@@ -4027,6 +4040,88 @@ def _bg_append_sent(account_id: str, raw_message: bytes) -> None:
         pass
 
 
+def _maybe_auto_forward(record: Dict[str, Any]) -> bool:
+    """If the email's current `category` has an enabled forward rule and
+    hasn't been forwarded for that folder yet, send a Fwd: copy via the
+    owning account's SMTP and mark the record so it won't fire again.
+
+    Returns True iff a forward was successfully sent (so the caller can
+    persist the mutated record). Any SMTP failure is swallowed — logging
+    only — so classification flows never fail because of a forward issue.
+    """
+    account_id = str(record.get("account_id") or "")
+    category = str(record.get("category") or "")
+    if not account_id or not category:
+        return False
+    rules = read_forward_rules_for_account(account_id)
+    if not rules:
+        return False
+    already = set(record.get("auto_forwarded_folders") or [])
+    acc = get_account(account_id) or {}
+    settings = acc.get("settings") or {}
+    own_email = str(settings.get("sender_email") or "").strip().lower()
+    did_send = False
+    for rule in rules:
+        if not rule.get("enabled", True):
+            continue
+        if rule.get("folder") != category:
+            continue
+        dest = str(rule.get("destination") or "").strip()
+        if not dest:
+            continue
+        if own_email and dest.lower() == own_email:
+            continue  # defensive — the endpoint already rejects this
+        marker = f"{category}→{dest.lower()}"
+        if marker in already:
+            continue
+        try:
+            attachments: List[Dict[str, Any]] = []
+            for meta in list_attachments_meta(record.get("id") or ""):
+                try:
+                    path = get_attachment_path(record.get("id") or "", meta["filename"])
+                except ValueError:
+                    continue
+                if not path.exists() or not path.is_file():
+                    continue
+                attachments.append({
+                    "filename": meta["filename"],
+                    "data": path.read_bytes(),
+                    "content_type": meta.get("content_type") or "application/octet-stream",
+                })
+
+            orig_subject = str(record.get("subject") or "")
+            fwd_subject = orig_subject if orig_subject.lower().startswith(("fwd:", "fw:")) else f"Fwd: {orig_subject}"
+            header_lines = [
+                "---------- 自动转发 (XEmail) ----------",
+                f"发件人: {record.get('from_raw') or record.get('from_email') or ''}",
+                f"收件人: {record.get('to_raw') or record.get('to_email') or ''}",
+            ]
+            if record.get("cc_raw") or record.get("cc_email"):
+                header_lines.append(f"抄送: {record.get('cc_raw') or record.get('cc_email') or ''}")
+            header_lines.append(f"时间: {record.get('received_at') or ''}")
+            header_lines.append(f"分类: {category}")
+            header_lines.append("")
+            fwd_body = "\n".join(header_lines) + (record.get("body") or "")
+            send_email(
+                settings,
+                to=dest,
+                subject=fwd_subject,
+                body=fwd_body,
+                attachments=attachments,
+            )
+            already.add(marker)
+            did_send = True
+        except Exception as exc:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "auto-forward failed account=%s folder=%s to=%s: %s",
+                account_id, category, dest, exc,
+            )
+    if did_send:
+        record["auto_forwarded_folders"] = sorted(already)
+    return did_send
+
+
 @app.post("/api/send", response_model=SendResult)
 def send_mail(
     payload: SendEmailRequest,
@@ -5032,6 +5127,8 @@ def update_email(
             target["category"] = cat
             target["_old_category"] = old_category  # used by background sync
             changed_category = True
+    if changed_category:
+        _maybe_auto_forward(target)
     upsert_email(target)
 
     # Schedule best-effort IMAP sync if any tracked flag changed. The sync
@@ -5208,6 +5305,66 @@ def delete_folder(
     new_folders = [f for f in folders if f != path]
     write_folders(new_folders, active_id)
     return {"status": "ok", "moved": moved}
+
+
+# -------- folder → email auto-forward rules --------
+#
+# Rules are stored per account and consulted in classification paths
+# (receive, scope-reclassify, single-email reclassify, right-click move)
+# via `_maybe_auto_forward`. Keeping validation close to the endpoint
+# (folder-exists, destination != self) avoids surprise self-loops.
+
+
+def _forward_rules_for_user(user: User) -> List[Dict[str, Any]]:
+    active_id = _active_account_id_for(user)
+    return read_forward_rules_for_account(active_id)
+
+
+@app.get("/api/forward-rules", response_model=List[ForwardRule])
+def api_list_forward_rules(user: User = Depends(current_user)) -> List[ForwardRule]:
+    return [ForwardRule(**r) for r in _forward_rules_for_user(user)]
+
+
+@app.put("/api/forward-rules", response_model=List[ForwardRule])
+def api_replace_forward_rules(
+    payload: ForwardRulesPayload, user: User = Depends(current_user)
+) -> List[ForwardRule]:
+    active_id = _active_account_id_for(user)
+    folders = set(read_folders(active_id))
+    acc = get_account(active_id) or {}
+    own_email = (acc.get("settings") or {}).get("sender_email") or ""
+    own_email_lc = own_email.strip().lower()
+
+    cleaned: List[Dict[str, Any]] = []
+    seen: set = set()
+    for rule in payload.rules:
+        folder = rule.folder.strip()
+        if folder not in folders:
+            raise HTTPException(
+                status_code=400, detail=f"文件夹不存在：{folder}。"
+            )
+        dest = str(rule.destination).strip()
+        dest_lc = dest.lower()
+        if own_email_lc and dest_lc == own_email_lc:
+            raise HTTPException(
+                status_code=400,
+                detail="不能把邮件自动转发给自己（会导致循环转发）。",
+            )
+        key = (folder, dest_lc)
+        if key in seen:
+            raise HTTPException(
+                status_code=400,
+                detail=f"规则重复：{folder} → {dest}。",
+            )
+        seen.add(key)
+        cleaned.append({
+            "folder": folder,
+            "destination": dest,
+            "enabled": bool(rule.enabled),
+        })
+
+    write_forward_rules_for_account(active_id, cleaned)
+    return [ForwardRule(**r) for r in cleaned]
 
 
 # -------- contacts --------

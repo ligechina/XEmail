@@ -111,6 +111,10 @@ class EmailRecord(BaseModel):
     # Prefer the earliest References msg-id, then In-Reply-To, then self Message-Id.
     source_message_id: Optional[str] = None
     spam_reason: Optional[str] = None
+    # Folders this email has already been auto-forwarded for. Written by the
+    # forward-rule hook so that moving an email out and back into the same
+    # folder (or re-classifying) does not cause a duplicate forward.
+    auto_forwarded_folders: List[str] = Field(default_factory=list)
 
 
 class EmailUpdate(BaseModel):
@@ -685,6 +689,24 @@ class ClassifyUnsortedResult(BaseModel):
     classified: int
     remaining: int
     total: int
+
+
+# -------- folder → email auto-forward --------
+#
+# One row per (folder, destination). When an email's `category` first lands
+# on `folder` (via LLM classify, right-click move, or scope-reclassify), the
+# email is auto-forwarded to `destination` via the account's own SMTP. The
+# email record remembers which folders it has already been forwarded for,
+# so toggling the rule off/on or re-classifying never doubles the send.
+
+class ForwardRule(BaseModel):
+    folder: str = Field(..., min_length=1, max_length=256)
+    destination: EmailStr
+    enabled: bool = True
+
+
+class ForwardRulesPayload(BaseModel):
+    rules: List[ForwardRule] = Field(default_factory=list)
 
 
 # -------- contacts (per-account address book) --------

@@ -33,6 +33,16 @@
         --success: #16a34a;
       }
       * { box-sizing: border-box; }
+      /* All content text-selectable by default. Tabs still opt out via
+         their own user-select:none. */
+      html, body {
+        -webkit-user-select: text;
+        user-select: text;
+      }
+      button {
+        -webkit-user-select: text;
+        user-select: text;
+      }
       body {
         margin: 0;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
